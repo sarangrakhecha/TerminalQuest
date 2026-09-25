@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+
+# the game's own sandbox — real files it creates/deletes on disk
+TerminalQuest_Arcade/
