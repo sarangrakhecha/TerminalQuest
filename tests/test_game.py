@@ -808,6 +808,43 @@ class TestQuitCombo:
             buf, matched = tq.feed_quit_combo(buf, ch, "win")
         assert matched
 
+    @staticmethod
+    def _run_wait_for_quit(keys):
+        """Drive wait_for_quit with a scripted key stream; returns True if it
+        returned (quit) before the keys ran out."""
+        stream = iter(keys)
+
+        class Scr:
+            def getch(self):
+                try:
+                    return next(stream)
+                except StopIteration:
+                    raise RuntimeError("out of keys")
+
+        try:
+            tq.wait_for_quit(Scr())
+            return True
+        except RuntimeError:
+            return False
+
+    def test_wq_then_enter_quits_even_with_idle_ticks_between_keys(self):
+        idle = -1
+        keys = [idle, idle, ord(":"), idle, idle, ord("w"), idle, ord("q"), idle, 10]
+        assert self._run_wait_for_quit(keys)
+
+    def test_wq_without_enter_does_not_quit_yet(self):
+        assert not self._run_wait_for_quit([ord(":"), ord("w"), ord("q"), -1, -1])
+
+    def test_enter_alone_does_not_quit(self):
+        assert not self._run_wait_for_quit([10, 10, 13])
+
+    def test_a_key_between_wq_and_enter_cancels_it(self):
+        assert not self._run_wait_for_quit([ord(":"), ord("w"), ord("q"), ord("x"), 10])
+
+    def test_keypad_enter_also_confirms(self):
+        import curses
+        assert self._run_wait_for_quit([ord(":"), ord("w"), ord("q"), curses.KEY_ENTER])
+
     def test_a_special_key_like_an_arrow_resets_the_buffer(self):
         buf, _ = tq.feed_quit_combo("", ord(":"), "overworld")
         buf, _ = tq.feed_quit_combo(buf, ord("w"), "overworld")

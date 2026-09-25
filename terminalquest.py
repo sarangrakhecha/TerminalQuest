@@ -1444,7 +1444,7 @@ def draw_win(stdscr, game):
     row += len(lines)
     # its own solid highlighted bar, not a dim afterthought line — this is
     # the one thing the player actually needs to know how to do here.
-    prompt = " TYPE :wq TO EXIT "
+    prompt = " TYPE :wq THEN PRESS ENTER TO EXIT "
     try:
         stdscr.addstr(row, max(0, (w - len(prompt)) // 2), prompt,
                       curses.A_BOLD | curses.A_REVERSE)
@@ -1491,6 +1491,19 @@ def feed_quit_combo(buf, ch, mode):
     return buf, buf == QUIT_COMBO
 
 
+def wait_for_quit(stdscr):
+    """Block on the win screen until the player types ":wq" and then Enter,
+    like vim. Idle ticks (getch() == -1) between keystrokes are ignored."""
+    buf, armed = "", False
+    while True:
+        ch = stdscr.getch()
+        if ch == -1:
+            continue
+        if armed and ch in (curses.KEY_ENTER, 10, 13):
+            return
+        buf, armed = feed_quit_combo(buf, ch, "win")
+
+
 def main(stdscr):
     curses.curs_set(0)
     try:
@@ -1533,17 +1546,12 @@ def main(stdscr):
             draw_gameover(stdscr, game)
         elif game.mode == "win":
             draw_win(stdscr, game)
-            # ":wq" — and only ":wq" — closes the game out here, once it's
-            # actually over. Not "any key": a held-over arrow key from
-            # walking onto the exit tile would otherwise close this
-            # instantly, before the banner is even seen. See
-            # feed_quit_combo for the (separately tested) matching logic.
-            quit_combo = ""
-            while True:
-                ch = stdscr.getch()
-                quit_combo, matched = feed_quit_combo(quit_combo, ch, game.mode)
-                if matched:
-                    return
+            # ":wq" then Enter — and only that — closes the game out here,
+            # once it's actually over. Not "any key": a held-over arrow key
+            # from walking onto the exit tile would otherwise close this
+            # instantly, before the banner is even seen.
+            wait_for_quit(stdscr)
+            return
 
         ch = stdscr.getch()
         if ch == -1:

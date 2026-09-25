@@ -12,7 +12,7 @@ starting in a scratch folder on your machine. Get it right, and something
 in the world reacts — a door unlocks, a gate opens, a locked room stops
 being locked.
 
-**8 commands · 8 stations · 3 levels · 109 automated tests · zero dependencies**
+**8 commands · 8 stations · 3 levels · 114 automated tests · zero dependencies**
 
 ## Contents
 
@@ -200,7 +200,7 @@ TERMINALQUEST_ROOT=/path/to/somewhere python3 terminalquest.py --reset
 | At a terminal | `?` | Explain the last result (once something's been run) |
 | At a terminal | `Esc` | Clear the line, or leave if it's already empty |
 | Level-complete screen | `Space` | Continue — shown as its own highlighted bar so it's easy to spot |
-| The final "you win" screen | `:wq` | The only way out, once the game's actually over |
+| The final "you win" screen | `:wq` then `Enter` | The only way out, once the game's actually over |
 
 | Symbol | Meaning |
 |---|---|
@@ -274,7 +274,7 @@ For adversarial testing, use a disposable VM or container.
 
 ```text
 terminalquest.py      game logic, the 8-station map, shell runner, and the curses UI
-tests/test_game.py    the pytest regression suite (109 tests)
+tests/test_game.py    the pytest regression suite (114 tests)
 screenshots/          images rendered from the game's own drawing code
 README.md             this file
 ```
@@ -290,7 +290,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-109 tests, no real terminal required. What's actually covered:
+114 tests, no real terminal required. What's actually covered:
 
 | Area | What's tested |
 |---|---|
@@ -327,12 +327,12 @@ How the suite is designed, and what was run before this release:
   rather than hardcoded step counts, so moving a door doesn't break them.
 - **Deterministic and fast.** No real terminal, network, or timing
   dependence; the full suite runs in about a second.
-- **Release check.** Before the latest release: `pytest` → 109 passed,
+- **Release check.** Before the latest release: `pytest` → 114 passed,
   `python3 terminalquest.py --reset --selftest` → `SELFTEST PASSED`, run from a
   clean checkout with no stale `__pycache__`.
 
 - **Measured coverage.** `pytest --cov=terminalquest --cov-branch` reports
-  **67%** (1025 statements, 372 branches, 109 tests). The gap is mostly the live
+  **68%** (1032 statements, 376 branches, 114 tests). The gap is mostly the live
   curses input/main loop and the built-in `--selftest` routine, which pytest
   doesn't execute (the self-test is run separately, above). Game logic, gates,
   station checks and rendering are the well-covered parts.
