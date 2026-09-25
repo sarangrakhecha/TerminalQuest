@@ -565,9 +565,42 @@ class TestFullPlaythrough:
         for sid in tq.STATION_ORDER:
             solve(game, sid)
 
+        tq.collect_all_coins(game)
         tq.walk_to(game, tq.EXIT_POS)
         assert game.mode == "win"
         assert set(game.learned) == {"ls", "cat", "cd", "mkdir", "touch", "cp", "mv", "rm"}
+
+    def test_exit_refuses_a_win_with_coins_missing(self, game):
+        for sid in tq.STATION_ORDER:
+            solve(game, sid)
+        left = game.coins_remaining()
+        assert left > 0  # solving stations alone doesn't collect the optional coins
+        tq.walk_to(game, tq.EXIT_POS)
+        assert game.mode == "sign"
+        assert "SIGNAL INCOMPLETE" in game.sign_text
+        assert f"{left} of {len(tq.COINS_INIT)}" in game.sign_text
+        assert (game.px, game.py) != tq.EXIT_POS
+
+    def test_the_incomplete_signal_message_is_actually_drawn(self, game):
+        for sid in tq.STATION_ORDER:
+            solve(game, sid)
+        tq.walk_to(game, tq.EXIT_POS)
+        screen = FakeScreen()
+        tq.draw_sign(screen, game)
+        dump = screen.dump()
+        assert "SIGNAL INCOMPLETE" in dump
+        assert "still uncollected" in dump
+
+    def test_exit_opens_once_the_last_missing_coin_is_collected(self, game):
+        for sid in tq.STATION_ORDER:
+            solve(game, sid)
+        tq.walk_to(game, tq.EXIT_POS)
+        assert game.mode == "sign"
+        game.dismiss_sign()
+        tq.collect_all_coins(game)
+        assert game.coins_remaining() == 0
+        tq.walk_to(game, tq.EXIT_POS)
+        assert game.mode == "win"
 
     def test_exit_stays_locked_until_the_last_station(self, game):
         for sid in tq.STATION_ORDER[:-1]:
@@ -705,6 +738,7 @@ class TestFoggedBandRendering:
                     if game.coins[coin_pos]:
                         tq.walk_to(game, coin_pos)
                 game.dismiss_congrats()
+        tq.collect_all_coins(game)
         tq.walk_to(game, tq.EXIT_POS)
         assert game.mode == "win"
         assert game.stage == len(tq.STAGES) + 1

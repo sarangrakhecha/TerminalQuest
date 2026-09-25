@@ -12,7 +12,7 @@ starting in a scratch folder on your machine. Get it right, and something
 in the world reacts — a door unlocks, a gate opens, a locked room stops
 being locked.
 
-**8 commands · 8 stations · 3 levels · 105 automated tests · zero dependencies**
+**8 commands · 8 stations · 3 levels · 108 automated tests · zero dependencies**
 
 ## Contents
 
@@ -131,7 +131,7 @@ The eight rooms are split into **three levels**:
 
 - **Level 1** — rooms A, B, C, D (top row)
 - **Level 2** — rooms E, F
-- **Level 3** — rooms G, H (no coin gate — clear both stations and walk out)
+- **Level 3** — rooms G, H (no coin gate — clear both stations, then collect any coins you skipped and walk out)
 
 A level you haven't reached yet renders as a solid sealed block labeled
 **LEVEL n — SEALED**. While neither of the two remaining levels has been
@@ -145,6 +145,12 @@ its own highlighted `PRESS SPACE TO CONTINUE` bar. It waits for that
 specific key on purpose: an earlier version dismissed on *any* key, which
 meant it could vanish inside a single frame if you were still holding an
 arrow key from walking into the last coin.
+
+**All eight coins are required to leave.** The two coins that aren't needed
+to clear a level (one in room H, one in a hidden closet) are still
+mandatory for the win. Walk into `X` with any missing and a **SIGNAL
+INCOMPLETE** message tells you how many are left; you stay outside the exit
+until you've collected them all.
 
 A level you've already cleared **stays visible for good** — it never goes
 back under fog behind you. Finish all three and a big block-letter banner
@@ -268,7 +274,7 @@ For adversarial testing, use a disposable VM or container.
 
 ```text
 terminalquest.py      game logic, the 8-station map, shell runner, and the curses UI
-tests/test_game.py    the pytest regression suite (105 tests)
+tests/test_game.py    the pytest regression suite (108 tests)
 screenshots/          images rendered from the game's own drawing code
 README.md             this file
 ```
@@ -284,7 +290,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-105 tests, no real terminal required. What's actually covered:
+108 tests, no real terminal required. What's actually covered:
 
 | Area | What's tested |
 |---|---|
@@ -321,12 +327,12 @@ How the suite is designed, and what was run before this release:
   rather than hardcoded step counts, so moving a door doesn't break them.
 - **Deterministic and fast.** No real terminal, network, or timing
   dependence; the full suite runs in about a second.
-- **Release check.** Before the latest release: `pytest` → 105 passed,
+- **Release check.** Before the latest release: `pytest` → 108 passed,
   `python3 terminalquest.py --reset --selftest` → `SELFTEST PASSED`, run from a
   clean checkout with no stale `__pycache__`.
 
 - **Measured coverage.** `pytest --cov=terminalquest --cov-branch` reports
-  **65%** (995 statements, 358 branches, 105 tests). The gap is mostly the live
+  **67%** (1025 statements, 372 branches, 108 tests). The gap is mostly the live
   curses input/main loop and the built-in `--selftest` routine, which pytest
   doesn't execute (the self-test is run separately, above). Game logic, gates,
   station checks and rendering are the well-covered parts.

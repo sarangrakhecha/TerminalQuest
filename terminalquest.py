@@ -628,13 +628,34 @@ def bfs_route(game, target):
 
 def walk_to(game, target):
     """Drive the player from where it is to target via try_move. Stops early
-    if a move changes the game mode (e.g. stepping onto a computer/sign)."""
-    moves = bfs_route(game, target)
-    assert moves is not None, f"no path from {(game.px, game.py)} to {target}"
-    for dx, dy in moves:
-        if game.mode != "overworld":
-            break
-        game.try_move(dx, dy)
+    if a move changes the game mode (e.g. stepping onto a computer/sign), and
+    re-plans if an enemy hit respawns the player mid-route."""
+    for _ in range(6):
+        moves = bfs_route(game, target)
+        assert moves is not None, f"no path from {(game.px, game.py)} to {target}"
+        x, y = game.px, game.py
+        for dx, dy in moves:
+            if game.mode != "overworld":
+                return
+            game.try_move(dx, dy)
+            x, y = x + dx, y + dy
+            if (game.px, game.py) != (x, y) and game.mode == "overworld":
+                break  # blocked or respawned — plan again from here
+        else:
+            return
+        if (game.px, game.py) == target:
+            return
+
+
+def collect_all_coins(game):
+    """Test/selftest helper: walk to every coin still on the map."""
+    for pos in COINS_INIT:
+        while game.coins[pos]:
+            game.dismiss_sign()
+            game.dismiss_congrats()
+            walk_to(game, pos)
+    game.dismiss_sign()
+    game.dismiss_congrats()
 
 
 # ==========================================================================
@@ -751,6 +772,19 @@ class Game:
             self.flash = 3
             return
 
+        if (nx, ny) == EXIT_POS:
+            left = self.coins_remaining()
+            if left:
+                # Stay outside the exit: the signal isn't fully recovered yet.
+                self.mode = "sign"
+                self.sign_text = (
+                    "SIGNAL INCOMPLETE\n\n"
+                    f"{left} of {len(COINS_INIT)} signal coins still uncollected.\n"
+                    "Every coin must be recovered before you can leave.\n\n"
+                    "Some are hidden — check the side rooms and sealed closets."
+                )
+                return
+
         if self.enemy_at(nx, ny) is not None and self.invuln == 0:
             self.px, self.py = nx, ny
             self._hit()
@@ -777,6 +811,9 @@ class Game:
             self.mode = "win"
             self.stage = len(STAGES) + 1  # every level reads as cleared/sealed now
             return
+
+    def coins_remaining(self):
+        return sum(1 for still_there in self.coins.values() if still_there)
 
     def dismiss_sign(self):
         if self.mode == "sign":
@@ -1643,7 +1680,13 @@ def selftest():
     # B's secret closet should be open by now
     assert g.grid[HIDDEN_CLOSET_CELLS[0][1]][HIDDEN_CLOSET_CELLS[0][0]] == "."
 
-    # every station solved — walk to the exit
+    # every station solved — but the exit stays shut until all 8 coins are in
+    walk_to(g, EXIT_POS)
+    assert g.mode == "sign" and "SIGNAL INCOMPLETE" in g.sign_text, g.mode
+    assert (g.px, g.py) != EXIT_POS
+    g.dismiss_sign()
+    collect_all_coins(g)
+    assert g.coins_remaining() == 0
     walk_to(g, EXIT_POS)
     assert g.mode == "win", g.mode
     assert set(g.learned) == {"ls", "cat", "cd", "mkdir", "touch", "cp", "mv", "rm"}
