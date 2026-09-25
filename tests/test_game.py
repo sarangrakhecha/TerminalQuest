@@ -21,6 +21,7 @@ point. If you add a new station, please add a test alongside it.
 """
 import curses
 import os
+import shutil
 import sys
 
 import pytest
@@ -366,37 +367,66 @@ class TestStations:
         game.terminal_submit()
         assert not game.stations["H"].solved
 
-    def test_a_station_folder_missing_its_expected_file_gets_repaired(self, sandbox):
-        # Reproduces the real bug: station C's folder already exists (e.g.
-        # from an earlier run or version) but its "vault" subfolder is
-        # missing — cd vault should still work after a plain relaunch,
-        # without needing --reset.
-        c_root = os.path.join(sandbox, "puzzles", "stationC")
-        os.makedirs(c_root, exist_ok=True)
-        assert not os.path.isdir(os.path.join(c_root, "vault"))
-
-        g = tq.Game(sandbox, reset=False)
-        assert os.path.isdir(os.path.join(c_root, "vault"))
-        enter(g, "C")
-        g.input_buf = "cd vault"
-        g.terminal_submit()
-        assert g.stations["C"].solved
-
-    def test_setup_does_not_rerun_on_a_later_relaunch(self, sandbox):
-        # Once a station's marker exists, a later relaunch must not
-        # recreate its starting files — that would silently undo real
-        # progress the player made in an earlier session (e.g. G's
-        # draft.txt reappearing after it was already renamed to final.txt).
+    def test_a_plain_relaunch_starts_the_stations_fresh(self, sandbox):
+        # Progress isn't saved, so training files must not persist either:
+        # a solved G (draft.txt -> final.txt) has to be undone on relaunch,
+        # or the leftover final.txt would mark G solved behind the game's back.
         g1 = tq.Game(sandbox, reset=False)
         solve(g1, "G")
         g_root = g1.stations["G"].root
         assert os.path.isfile(os.path.join(g_root, "final.txt"))
-        assert not os.path.exists(os.path.join(g_root, "draft.txt"))
 
-        tq.Game(sandbox, reset=False)  # a plain relaunch, no --reset
-        assert not os.path.exists(os.path.join(g_root, "draft.txt")), (
-            "setup re-ran and recreated draft.txt, undoing prior progress"
-        )
+        g2 = tq.Game(sandbox, reset=False)  # plain relaunch, no --reset
+        assert os.path.isfile(os.path.join(g_root, "draft.txt"))
+        assert not os.path.exists(os.path.join(g_root, "final.txt"))
+        assert not g2.stations["G"].solved
+
+    def test_an_unrelated_command_cannot_solve_a_station_after_relaunch(self, sandbox):
+        g1 = tq.Game(sandbox, reset=False)
+        solve(g1, "H")  # rm jam.lock
+        g2 = tq.Game(sandbox, reset=False)
+        enter(g2, "H")
+        g2.input_buf = "pwd"
+        g2.terminal_submit()
+        assert not g2.stations["H"].solved
+
+    def test_a_deleted_setup_file_is_restored_on_relaunch(self, sandbox):
+        g1 = tq.Game(sandbox, reset=False)
+        vault = os.path.join(g1.stations["C"].root, "vault")
+        shutil.rmtree(vault)
+        tq.Game(sandbox, reset=False)
+        assert os.path.isdir(vault)
+
+    @pytest.mark.parametrize("station_id,wrong", [
+        ("D", "mkdir mystuff"),
+        ("D", "mkdir anything"),
+        ("E", "touch random.txt"),
+    ])
+    def test_wrong_target_does_not_solve_but_gets_a_nudge(self, game, station_id, wrong):
+        enter(game, station_id)
+        game.input_buf = wrong
+        game.terminal_submit()
+        st = game.stations[station_id]
+        assert not st.solved
+        assert "this mission needs" in st.transcript[-1][1]
+
+    @pytest.mark.parametrize("station_id,command", [
+        ("D", "mkdir -p stash"),
+        ("D", "mkdir ./stash"),
+        ("E", "printf '' > spare.key"),
+        ("E", "touch ./spare.key"),
+    ])
+    def test_any_command_that_produces_the_right_result_solves_it(self, game, station_id, command):
+        enter(game, station_id)
+        game.input_buf = command
+        game.terminal_submit()
+        assert game.stations[station_id].solved
+
+    def test_a_file_named_stash_is_not_a_folder_named_stash(self, game):
+        enter(game, "D")
+        game.input_buf = "touch stash"
+        game.terminal_submit()
+        assert not game.stations["D"].solved
 
     def test_solved_count_tracks_all_eight_stations(self, game):
         assert game.solved_count() == 0

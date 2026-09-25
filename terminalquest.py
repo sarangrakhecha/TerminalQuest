@@ -58,7 +58,10 @@ CWD_MARK = "\x01__TQ_CWD__\x02"
 
 
 def run_command(line, cwd, sandbox_root):
-    """Execute `line` as real bash, jailed to sandbox_root. Returns (new_cwd, out, err)."""
+    """Execute `line` as real bash, starting in `cwd`. The tracked working
+    directory is snapped back if it would leave sandbox_root — this is NOT an
+    OS-level sandbox; bash itself can still touch any path it has access to.
+    Returns (new_cwd, out, err)."""
     stripped = line.strip()
     if not stripped:
         return cwd, "", ""
@@ -171,14 +174,14 @@ def _check_cd(st):
 def _check_mkdir(st):
     if st.solved:
         return
-    if any(os.path.isdir(os.path.join(st.root, name)) for name in os.listdir(st.root)):
+    if os.path.isdir(os.path.join(st.root, "stash")):
         st.solved = True
 
 
 def _check_touch(st):
     if st.solved:
         return
-    if any(os.path.isfile(os.path.join(st.root, name)) for name in os.listdir(st.root)):
+    if os.path.isfile(os.path.join(st.root, "spare.key")):
         st.solved = True
 
 
@@ -203,6 +206,21 @@ def _check_rm(st):
         return
     if not os.path.exists(os.path.join(st.root, "jam.lock")):
         st.solved = True
+
+
+def near_miss_hint(sid, st):
+    """For the create-something stations (D: mkdir, E: touch): the command
+    ran fine but made the wrong thing. Returns a one-line nudge instead of
+    silently leaving the station unsolved, or None when it doesn't apply."""
+    if sid == "D" and first_word(st.last_command) == "mkdir":
+        made = [n for n in os.listdir(st.root) if os.path.isdir(os.path.join(st.root, n))]
+        if made and "stash" not in made:
+            return "*** mkdir worked, but this mission needs a folder called stash. ***"
+    if sid == "E" and first_word(st.last_command) == "touch":
+        made = [n for n in os.listdir(st.root) if os.path.isfile(os.path.join(st.root, n))]
+        if made and "spare.key" not in made:
+            return "*** touch worked, but this mission needs a file called spare.key. ***"
+    return None
 
 
 STATION_META = {
@@ -318,28 +336,19 @@ def command_does(sid):
 
 
 def build_stations(game_root):
-    """Build every station's real puzzle folder.
+    """Build every station's real puzzle folder from scratch.
 
-    A station's folder can already exist from an earlier session — the game
-    never wipes ~/TerminalQuest_Arcade on its own, and the player is typing
-    real bash there, so they can (accidentally or not) delete or rename
-    whatever setup() created. The old code only ran setup() the very first
-    time a station's folder was created, so once that folder existed at
-    all, a station whose expected file/folder had since gone missing (e.g.
-    `vault/` deleted) would never get it back — the station became
-    permanently unsolvable without `--reset`.
-
-    Fix: track, per station, whether setup() has ever actually run for this
-    game_root, with a tiny marker file kept OUTSIDE the station's own
-    folder — never inside it, since a couple of checkers (mkdir/touch) treat
-    "any file exists in this folder" as solved, and a marker living inside
-    would falsely trigger that. Setup only runs once per game_root per
-    station, same as before; the difference is a station whose folder
-    exists but was never actually set up (the vault case) now gets set up
-    on this run instead of being silently skipped forever.
+    Every launch starts a fresh campaign, so the puzzle folders are wiped and
+    re-created each time. The setup markers live OUTSIDE the station folders
+    on purpose: a marker inside would look like a stray file to a checker.
     """
     puzzles_root = os.path.join(game_root, "puzzles")
     markers_root = os.path.join(game_root, ".setup_markers")
+    # Game progress (solved stations, doors, coins) is not saved between
+    # launches, so the training folders must not persist either — otherwise
+    # leftover files would mark a station "solved" the game doesn't know about.
+    shutil.rmtree(puzzles_root, ignore_errors=True)
+    shutil.rmtree(markers_root, ignore_errors=True)
     os.makedirs(markers_root, exist_ok=True)
     stations, checkers = {}, {}
     for sid in STATION_ORDER:
@@ -842,6 +851,10 @@ class Game:
             else:
                 st.transcript.append(("", "*** something unlocks, somewhere. ***"))
             self.return_timer = 20
+        elif not st.solved:
+            nudge = near_miss_hint(self.active_station, st)
+            if nudge:
+                st.transcript.append(("", nudge))
 
     def tick_terminal(self):
         if self.mode == "terminal" and self.return_timer > 0:

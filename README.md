@@ -8,11 +8,11 @@ actually use it.
 No slides. No multiple choice. You move around a ship with arrow keys,
 dodge patrolling enemies, and every so often walk up to an old computer.
 It drops you into a **real bash prompt**. Whatever you type actually runs,
-sandboxed to a scratch folder on your machine. Get it right, and something
+starting in a scratch folder on your machine. Get it right, and something
 in the world reacts — a door unlocks, a gate opens, a locked room stops
 being locked.
 
-**8 commands · 8 stations · 3 levels · 96 automated tests · zero dependencies**
+**8 commands · 8 stations · 3 levels · 105 automated tests · zero dependencies**
 
 ## Contents
 
@@ -167,8 +167,9 @@ python3 terminalquest.py
 instead.
 
 Everything the game creates lives under `~/TerminalQuest_Arcade` — a real
-folder on disk, one subfolder per station. Start completely fresh any time
-with:
+folder on disk, one subfolder per station. Every launch starts a fresh
+campaign (progress isn't saved) and rebuilds the training folders; `--reset`
+additionally deletes the whole game folder:
 
 ```bash
 python3 terminalquest.py --reset
@@ -267,7 +268,7 @@ For adversarial testing, use a disposable VM or container.
 
 ```text
 terminalquest.py      game logic, the 8-station map, shell runner, and the curses UI
-tests/test_game.py    the pytest regression suite (96 tests)
+tests/test_game.py    the pytest regression suite (105 tests)
 screenshots/          images rendered from the game's own drawing code
 README.md             this file
 ```
@@ -283,15 +284,15 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-96 tests, no real terminal required. What's actually covered:
+105 tests, no real terminal required. What's actually covered:
 
 | Area | What's tested |
 |---|---|
-| `run_command` | The real-bash execution layer — commands actually shell out to `/bin/bash` in a tmp sandbox, exactly like the live game |
+| `run_command` | The real-bash execution layer — commands actually shell out to `/bin/bash` from a temp folder, exactly like the live game |
 | Map & tiles | Grid layout, wall/door/floor classification, that every room and door lines up |
 | Movement | Walking, blocked-by-wall, blocked-by-locked-door, coin pickup, signs |
 | Enemies | Patrol movement, collision costing a life, game over at 0 lives |
-| Stations | All 8 stations, each solved by exactly one real command; wrong commands never solve anything (including the ones solved by a file's *absence*, which is its own edge case); a station whose folder exists but is missing its expected file gets repaired on relaunch, without undoing real progress |
+| Stations | All 8 stations, each solved by exactly one real command; wrong commands never solve anything, and a right command aimed at the wrong target (`mkdir mystuff` instead of `mkdir stash`) gets a nudge instead of a silent fail (including the ones solved by a file's *absence*, which is its own edge case); every launch starts a fresh campaign, so leftover files can't mark a station solved behind the game's back |
 | Level gates | Both coin-gated levels require *both* conditions (last station solved **and** every coin collected) in either order; the gate that has no coin requirement; the `":wq"`-quit combo's matching logic |
 | The lesson panel | COMMAND/WHAT IT DOES/SYNTAX/YOUR TASK content, `Tab`-to-insert, `?`-to-explain (including that a *failed* command is recognized as an error and never explained as if it had succeeded) |
 | Full playthrough | Every station in order, end to end, to the exit |
@@ -310,21 +311,22 @@ How the suite is designed, and what was run before this release:
   enemies; state-machine tests for stations and level gates; an end-to-end
   playthrough; and rendering/resize tests. A failure points at one layer.
 - **Real behavior, not mocks, where it matters.** Station checks run real
-  `/bin/bash` commands in a temp sandbox, so a test passes only if the actual
+  `/bin/bash` commands from a temp folder, so a test passes only if the actual
   command produces the actual filesystem result.
 - **Negative and edge cases.** Wrong commands never solve a station, gates need
-  *both* conditions in either order, dangerous commands are blocked, `cd` can't
-  escape the sandbox, and a half-set-up station is repaired on relaunch.
+  *both* conditions in either order, dangerous commands are blocked, the tracked
+  working directory can't leave the game folder, and leftover files from a
+  previous session can't solve a station.
 - **Resilient to change.** Tests navigate with a BFS pathfinder (`walk_to`)
   rather than hardcoded step counts, so moving a door doesn't break them.
 - **Deterministic and fast.** No real terminal, network, or timing
   dependence; the full suite runs in about a second.
-- **Release check.** Before the initial commit: `pytest` → 96 passed,
+- **Release check.** Before the latest release: `pytest` → 105 passed,
   `python3 terminalquest.py --reset --selftest` → `SELFTEST PASSED`, run from a
   clean checkout with no stale `__pycache__`.
 
 - **Measured coverage.** `pytest --cov=terminalquest --cov-branch` reports
-  **64%** (979 statements, 346 branches, 96 tests). The gap is mostly the live
+  **65%** (995 statements, 358 branches, 105 tests). The gap is mostly the live
   curses input/main loop and the built-in `--selftest` routine, which pytest
   doesn't execute (the self-test is run separately, above). Game logic, gates,
   station checks and rendering are the well-covered parts.
