@@ -1481,6 +1481,10 @@ def feed_quit_combo(buf, ch, mode):
     Resets (and never matches) while actually typing at a terminal prompt,
     where a colon/w/q are just ordinary command characters, and for
     non-printable/special keys (arrow keys and the like)."""
+    if ch == -1:
+        # curses' idle tick (no key pressed within the timeout) — not a
+        # keystroke, so it must not wipe a combo the player is mid-way through.
+        return buf, False
     if mode == "terminal" or not (0 <= ch < 256):
         return "", False
     buf = (buf + chr(ch))[-len(QUIT_COMBO):]

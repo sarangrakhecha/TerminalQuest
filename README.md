@@ -12,7 +12,7 @@ starting in a scratch folder on your machine. Get it right, and something
 in the world reacts — a door unlocks, a gate opens, a locked room stops
 being locked.
 
-**8 commands · 8 stations · 3 levels · 108 automated tests · zero dependencies**
+**8 commands · 8 stations · 3 levels · 109 automated tests · zero dependencies**
 
 ## Contents
 
@@ -274,7 +274,7 @@ For adversarial testing, use a disposable VM or container.
 
 ```text
 terminalquest.py      game logic, the 8-station map, shell runner, and the curses UI
-tests/test_game.py    the pytest regression suite (108 tests)
+tests/test_game.py    the pytest regression suite (109 tests)
 screenshots/          images rendered from the game's own drawing code
 README.md             this file
 ```
@@ -290,7 +290,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-108 tests, no real terminal required. What's actually covered:
+109 tests, no real terminal required. What's actually covered:
 
 | Area | What's tested |
 |---|---|
@@ -327,12 +327,12 @@ How the suite is designed, and what was run before this release:
   rather than hardcoded step counts, so moving a door doesn't break them.
 - **Deterministic and fast.** No real terminal, network, or timing
   dependence; the full suite runs in about a second.
-- **Release check.** Before the latest release: `pytest` → 108 passed,
+- **Release check.** Before the latest release: `pytest` → 109 passed,
   `python3 terminalquest.py --reset --selftest` → `SELFTEST PASSED`, run from a
   clean checkout with no stale `__pycache__`.
 
 - **Measured coverage.** `pytest --cov=terminalquest --cov-branch` reports
-  **67%** (1025 statements, 372 branches, 108 tests). The gap is mostly the live
+  **67%** (1025 statements, 372 branches, 109 tests). The gap is mostly the live
   curses input/main loop and the built-in `--selftest` routine, which pytest
   doesn't execute (the self-test is run separately, above). Game logic, gates,
   station checks and rendering are the well-covered parts.

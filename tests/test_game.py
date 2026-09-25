@@ -799,6 +799,15 @@ class TestQuitCombo:
         buf, matched = self._type(":wq", mode="terminal")
         assert matched is False
 
+    def test_idle_ticks_between_keystrokes_do_not_break_the_combo(self):
+        # Real bug: curses returns -1 every 100ms when no key is pressed, so
+        # typing ":wq" at human speed was resetting the buffer and could
+        # never match.
+        buf = ""
+        for ch in (ord(":"), -1, -1, ord("w"), -1, ord("q")):
+            buf, matched = tq.feed_quit_combo(buf, ch, "win")
+        assert matched
+
     def test_a_special_key_like_an_arrow_resets_the_buffer(self):
         buf, _ = tq.feed_quit_combo("", ord(":"), "overworld")
         buf, _ = tq.feed_quit_combo(buf, ord("w"), "overworld")
