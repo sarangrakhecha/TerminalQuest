@@ -302,6 +302,33 @@ Navigation in the tests uses `terminalquest.walk_to`, a small BFS
 pathfinder, instead of hardcoded step counts — so if you rearrange a room or
 move a door, the tests should keep passing without being touched.
 
+### Quality approach
+
+How the suite is designed, and what was run before this release:
+
+- **Layered checks.** Unit-level tests for the shell layer, map, movement and
+  enemies; state-machine tests for stations and level gates; an end-to-end
+  playthrough; and rendering/resize tests. A failure points at one layer.
+- **Real behavior, not mocks, where it matters.** Station checks run real
+  `/bin/bash` commands in a temp sandbox, so a test passes only if the actual
+  command produces the actual filesystem result.
+- **Negative and edge cases.** Wrong commands never solve a station, gates need
+  *both* conditions in either order, dangerous commands are blocked, `cd` can't
+  escape the sandbox, and a half-set-up station is repaired on relaunch.
+- **Resilient to change.** Tests navigate with a BFS pathfinder (`walk_to`)
+  rather than hardcoded step counts, so moving a door doesn't break them.
+- **Deterministic and fast.** No real terminal, network, or timing
+  dependence; the full suite runs in about a second.
+- **Release check.** Before the initial commit: `pytest` → 96 passed,
+  `python3 terminalquest.py --reset --selftest` → `SELFTEST PASSED`, run from a
+  clean checkout with no stale `__pycache__`.
+
+- **Measured coverage.** `pytest --cov=terminalquest --cov-branch` reports
+  **64%** (979 statements, 346 branches, 96 tests). The gap is mostly the live
+  curses input/main loop and the built-in `--selftest` routine, which pytest
+  doesn't execute (the self-test is run separately, above). Game logic, gates,
+  station checks and rendering are the well-covered parts.
+
 There's also a lighter, dependency-free smoke test built into the game
 itself, useful for a quick sanity check without installing anything:
 
