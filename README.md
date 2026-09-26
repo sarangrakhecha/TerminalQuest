@@ -13,7 +13,7 @@ in the world reacts — a door unlocks, a gate opens, a locked room stops
 being locked. After each level there's an optional 3-question recap quiz to
 help it stick — take it or skip it.
 
-**8 commands · 8 stations · 3 levels · 210 automated tests · zero dependencies**
+**8 commands · 8 stations · 3 levels · 238 automated tests · zero dependencies**
 
 ## Contents
 
@@ -295,6 +295,7 @@ For adversarial testing, use a disposable VM or container.
 terminalquest.py      game logic, the 8-station map, shell runner, and the curses UI
 tests/test_game.py    the pytest regression suite (game logic, rendering, stations)
 tests/test_quiz.py    the pytest suite for the optional recap quiz (96 tests)
+tests/test_ui.py      the curses-layer tests: colors, terminal panel, main() loop, selftest (28 tests)
 screenshots/          images rendered from the game's own drawing code
 README.md             this file
 ```
@@ -310,7 +311,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-210 tests, no real terminal required. What's actually covered:
+238 tests, no real terminal required. What's actually covered:
 
 | Area | What's tested |
 |---|---|
@@ -324,6 +325,7 @@ pytest
 | Full playthrough | Every station in order, end to end, to the exit |
 | Rendering | A `FakeScreen` stand-in renders `draw_base` and friends to plain text at an exact terminal size (including deliberately too-small ones), so a locked tile showing through, or a crash on a shrunk window, gets caught without a real terminal; covers the per-level fog/masking, the congrats screen, and the win banner |
 | Recap quiz | Every question's own stated answer passes the real-bash grader, and no do-nothing command (`true`, `pwd`, `echo hi`) passes any typed question; choice questions have exactly one valid answer; 3 distinct questions drawn from the right level's pool, reproducible with a seed; skip / hint-then-retry / reveal-after-two-misses flow; never costs lives or score; key handling and every quiz screen at several window sizes |
+| Curses layer | `setup_colors` (color, high-contrast, no-color and error paths); the terminal panel in every state at several sizes; the real `main()` loop driven by a scripted fake screen — intro, movement, signs, congrats, playing a station from the keyboard, game over, the `:wq`-then-Enter exit, and taking or declining the quiz; the built-in `selftest()` |
 | Resize safety | Every `draw_*` function is exercised at several window sizes — comfortably large, far too small, too narrow, too short — and must never raise |
 
 Navigation in the tests uses `terminalquest.walk_to`, a small BFS
@@ -348,15 +350,17 @@ How the suite is designed, and what was run before this release:
   rather than hardcoded step counts, so moving a door doesn't break them.
 - **Deterministic and fast.** No real terminal, network, or timing
   dependence; the full suite runs in about a second.
-- **Release check.** Before the latest release: `pytest` → 210 passed,
+- **Release check.** Before the latest release: `pytest` → 238 passed,
   `python3 terminalquest.py --reset --selftest` → `SELFTEST PASSED`, run from a
   clean checkout with no stale `__pycache__`.
 
 - **Measured coverage.** `pytest --cov=terminalquest --cov-branch` reports
-  **71%** (1236 statements, 472 branches, 210 tests). The gap is mostly the live
-  curses input/main loop and the built-in `--selftest` routine, which pytest
-  doesn't execute (the self-test is run separately, above). Game logic, gates,
-  station checks and rendering are the well-covered parts.
+  **95%** (1236 statements, 472 branches, 238 tests). The live curses `main()`
+  loop is exercised by a scripted fake screen that feeds it real keypresses, so
+  input handling is covered too. What's left is small: a few defensive
+  branches, the subprocess-timeout path and the `__main__` entry point. Note
+  the fake screen isn't a real terminal, so this measures which code runs, not
+  how it looks on your screen.
 
 There's also a lighter, dependency-free smoke test built into the game
 itself, useful for a quick sanity check without installing anything:
