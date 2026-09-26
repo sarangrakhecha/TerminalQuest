@@ -5,14 +5,15 @@
 A tiny real-time arcade game that teaches you the terminal by making you
 actually use it.
 
-No slides. No multiple choice. You move around a ship with arrow keys,
+No slides, no lectures. You move around a ship with arrow keys,
 dodge patrolling enemies, and every so often walk up to an old computer.
 It drops you into a **real bash prompt**. Whatever you type actually runs,
 starting in a scratch folder on your machine. Get it right, and something
 in the world reacts — a door unlocks, a gate opens, a locked room stops
-being locked.
+being locked. After each level there's an optional 3-question recap quiz to
+help it stick — take it or skip it.
 
-**8 commands · 8 stations · 3 levels · 114 automated tests · zero dependencies**
+**8 commands · 8 stations · 3 levels · 210 automated tests · zero dependencies**
 
 ## Contents
 
@@ -69,6 +70,24 @@ press `Enter` yourself. After running something, `?` explains the result
 once, on request — it never becomes a mandatory screen you have to click
 past, and it correctly recognizes a *failed* command as a failure instead of
 explaining it as if it had worked.
+
+### The optional recap quiz
+
+When you clear a level (and again when you reach the exit) the game offers a
+quick **3-question recap** of what that level taught: press `Y` to take it or
+`N` to skip and carry on. Nothing depends on it.
+
+- Each level has its own pool of questions; **3 are drawn at random** every
+  time, so a replay isn't the same quiz.
+- Most are **"type it" questions**: your answer runs as real bash in a
+  throwaway folder and is graded on the *result*, so any command that gets
+  there counts (`mkdir -p photos` is as good as `mkdir photos`).
+- The rest are **pick a number** questions, with the options shuffled.
+- **First wrong answer:** you get a hint (and bash's real error message, if
+  there was one) and one more try. **Second wrong answer:** the answer is
+  shown and you move on.
+- It never costs a life or blocks progress; your running quiz score shows on
+  the win screen if you took any.
 
 ## What it looks like
 
@@ -274,7 +293,8 @@ For adversarial testing, use a disposable VM or container.
 
 ```text
 terminalquest.py      game logic, the 8-station map, shell runner, and the curses UI
-tests/test_game.py    the pytest regression suite (114 tests)
+tests/test_game.py    the pytest regression suite (game logic, rendering, stations)
+tests/test_quiz.py    the pytest suite for the optional recap quiz (96 tests)
 screenshots/          images rendered from the game's own drawing code
 README.md             this file
 ```
@@ -290,7 +310,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-114 tests, no real terminal required. What's actually covered:
+210 tests, no real terminal required. What's actually covered:
 
 | Area | What's tested |
 |---|---|
@@ -303,6 +323,7 @@ pytest
 | The lesson panel | COMMAND/WHAT IT DOES/SYNTAX/YOUR TASK content, `Tab`-to-insert, `?`-to-explain (including that a *failed* command is recognized as an error and never explained as if it had succeeded) |
 | Full playthrough | Every station in order, end to end, to the exit |
 | Rendering | A `FakeScreen` stand-in renders `draw_base` and friends to plain text at an exact terminal size (including deliberately too-small ones), so a locked tile showing through, or a crash on a shrunk window, gets caught without a real terminal; covers the per-level fog/masking, the congrats screen, and the win banner |
+| Recap quiz | Every question's own stated answer passes the real-bash grader, and no do-nothing command (`true`, `pwd`, `echo hi`) passes any typed question; choice questions have exactly one valid answer; 3 distinct questions drawn from the right level's pool, reproducible with a seed; skip / hint-then-retry / reveal-after-two-misses flow; never costs lives or score; key handling and every quiz screen at several window sizes |
 | Resize safety | Every `draw_*` function is exercised at several window sizes — comfortably large, far too small, too narrow, too short — and must never raise |
 
 Navigation in the tests uses `terminalquest.walk_to`, a small BFS
@@ -327,12 +348,12 @@ How the suite is designed, and what was run before this release:
   rather than hardcoded step counts, so moving a door doesn't break them.
 - **Deterministic and fast.** No real terminal, network, or timing
   dependence; the full suite runs in about a second.
-- **Release check.** Before the latest release: `pytest` → 114 passed,
+- **Release check.** Before the latest release: `pytest` → 210 passed,
   `python3 terminalquest.py --reset --selftest` → `SELFTEST PASSED`, run from a
   clean checkout with no stale `__pycache__`.
 
 - **Measured coverage.** `pytest --cov=terminalquest --cov-branch` reports
-  **68%** (1032 statements, 376 branches, 114 tests). The gap is mostly the live
+  **71%** (1236 statements, 472 branches, 210 tests). The gap is mostly the live
   curses input/main loop and the built-in `--selftest` routine, which pytest
   doesn't execute (the self-test is run separately, above). Game logic, gates,
   station checks and rendering are the well-covered parts.
@@ -383,7 +404,7 @@ merge:
 1. Read the [design rules](#design-rules-read-this-before-opening-a-pr) above
    first — most rejected PRs will be rejected for growing the scope, not
    for code quality.
-2. Add or update a test in `tests/test_game.py` for any behavior change.
+2. Add or update a test in `tests/test_game.py` (or `tests/test_quiz.py` for the quiz) for any behavior change.
 3. Run `pytest` and `python3 terminalquest.py --selftest` before opening
    the PR — both should pass clean.
 4. Keep it small. A 20-line diff that fixes one thing beats a 200-line

@@ -36,6 +36,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 from collections import deque
 
@@ -659,12 +660,148 @@ def collect_all_coins(game):
 
 
 # ==========================================================================
+# Optional end-of-level quiz. Three questions drawn at random from a pool
+# for each level. "Type it" questions are graded by running the learner's
+# answer as REAL bash in a throwaway folder and checking the result (so any
+# command that gets the right outcome counts); "choice" questions are
+# pick-a-number. First wrong answer -> a hint; second wrong -> the answer is
+# shown and the quiz moves on. Never costs a life, never blocks progress.
+# ==========================================================================
+
+QUIZ_LEN = 3
+
+
+def _type_q(prompt, hint, answer, check, files=None, dirs=None):
+    return dict(kind="type", prompt=prompt, hint=hint, answer=answer,
+                check=check, files=files or {}, dirs=dirs or [])
+
+
+def _choice_q(prompt, hint, options, correct, why):
+    """`correct` is the index in `options` of the right answer (options are
+    shuffled per draw, so the right one isn't always in the same slot)."""
+    return dict(kind="choice", prompt=prompt, hint=hint, options=options,
+                correct=correct, why=why, answer=options[correct])
+
+
+def _has(tmp, *names):
+    return all(os.path.exists(os.path.join(tmp, n)) for n in names)
+
+
+def _read(tmp, name):
+    try:
+        with open(os.path.join(tmp, name)) as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+QUIZ_POOLS = {
+    1: [  # ls, cat, cd, mkdir
+        _type_q("List the files in this folder.", "It's a two-letter command: l, s.", "ls",
+                lambda tmp, cwd, out: "apple.txt" in out and "pear.txt" in out,
+                files={"apple.txt": "a\n", "pear.txt": "p\n"}),
+        _type_q("Print what's written inside notes.txt.", "Use the command that prints a file: cat FILE.",
+                "cat notes.txt", lambda tmp, cwd, out: "remember the milk" in out,
+                files={"notes.txt": "remember the milk\n"}),
+        _type_q("Move into the folder called projects.", "cd means 'change directory': cd FOLDER.",
+                "cd projects",
+                lambda tmp, cwd, out: os.path.basename(cwd) == "projects", dirs=["projects"]),
+        _type_q("Create a new folder called photos.", "mkdir means 'make directory': mkdir NAME.",
+                "mkdir photos", lambda tmp, cwd, out: os.path.isdir(os.path.join(tmp, "photos"))),
+        _choice_q("Which command shows what's inside a file?", "One of these prints a file's contents.",
+                  ["ls", "cat", "cd", "mkdir"], 1, "cat prints a file's contents to the screen."),
+        _choice_q("Which command creates a new folder?", "Its name means 'make directory'.",
+                  ["mkdir", "cd", "ls", "cat"], 0, "mkdir makes a new folder."),
+        _choice_q("You type `cd vault` and nothing is printed. What happened?",
+                  "In the shell, no news is often good news.",
+                  ["It failed", "It worked: you're now inside vault", "vault is empty", "vault was deleted"], 1,
+                  "cd is silent when it works; it just changes which folder you're in."),
+        _choice_q("`cat missing.txt` prints 'No such file or directory'. What does that mean?",
+                  "Read the message: which thing can't bash find?",
+                  ["The file isn't in this folder", "cat is broken", "The file is empty", "You need admin rights"], 0,
+                  "bash couldn't find a file with that name in the current folder. Check the spelling with ls."),
+    ],
+    2: [  # touch, cp (+ review)
+        _type_q("Create a new, empty file called todo.txt.", "touch FILE creates an empty file.",
+                "touch todo.txt", lambda tmp, cwd, out: os.path.isfile(os.path.join(tmp, "todo.txt"))),
+        _type_q("Create a new, empty file called readme.md.", "touch FILE creates an empty file.",
+                "touch readme.md", lambda tmp, cwd, out: os.path.isfile(os.path.join(tmp, "readme.md"))),
+        _type_q("Copy report.txt to a new file called report-backup.txt.", "cp SOURCE DESTINATION.",
+                "cp report.txt report-backup.txt",
+                lambda tmp, cwd, out: _read(tmp, "report-backup.txt") == "q3 numbers\n" and _has(tmp, "report.txt"),
+                files={"report.txt": "q3 numbers\n"}),
+        _choice_q("Which command makes a new, empty file?", "It's not mkdir; that one makes folders.",
+                  ["touch", "cat", "cp", "ls"], 0, "touch creates an empty file if it doesn't exist."),
+        _choice_q("After `cp a.txt b.txt`, how many files do you have?", "Does cp remove the original?",
+                  ["1 (a.txt is gone)", "2 (a.txt and b.txt)", "1 (only b.txt)", "0"], 1,
+                  "cp copies: the original stays and you get a second file."),
+        _choice_q("In `cp template.txt backup.txt`, which name is the NEW file?",
+                  "Source first, destination second.",
+                  ["template.txt", "backup.txt", "both", "neither"], 1,
+                  "The first name is what you copy from; the second is the copy being made."),
+        _type_q("Review: create a folder called backups.", "mkdir NAME.", "mkdir backups",
+                lambda tmp, cwd, out: os.path.isdir(os.path.join(tmp, "backups"))),
+        _choice_q("Review: which command lists the files in a folder?", "It's the two-letter one.",
+                  ["cat", "ls", "cd", "touch"], 1, "ls lists what's in the current folder."),
+    ],
+    3: [  # mv, rm (+ review)
+        _type_q("Rename draft.txt to final.txt.", "mv OLD NEW renames a file.", "mv draft.txt final.txt",
+                lambda tmp, cwd, out: _has(tmp, "final.txt") and not _has(tmp, "draft.txt"),
+                files={"draft.txt": "d\n"}),
+        _type_q("Move photo.jpg into the folder called archive.", "mv FILE FOLDER moves it inside.",
+                "mv photo.jpg archive",
+                lambda tmp, cwd, out: _has(tmp, "archive/photo.jpg") and not _has(tmp, "photo.jpg"),
+                files={"photo.jpg": "img\n"}, dirs=["archive"]),
+        _type_q("Delete the file junk.tmp.", "rm FILE deletes it, with no undo.", "rm junk.tmp",
+                lambda tmp, cwd, out: not _has(tmp, "junk.tmp"), files={"junk.tmp": "x\n"}),
+        _choice_q("Which command deletes a file with no way to undo it?", "It's the dangerous one.",
+                  ["rm", "mv", "cp", "touch"], 0, "rm permanently deletes; there's no trash can."),
+        _choice_q("What does `mv old.txt new.txt` do?", "mv also means 'rename'.",
+                  ["Copies it", "Renames old.txt to new.txt", "Deletes both", "Prints it"], 1,
+                  "mv moves or renames: old.txt is gone and new.txt holds its contents."),
+        _choice_q("What's the difference between cp and mv?", "Think about what's left behind.",
+                  ["cp keeps the original; mv doesn't", "No difference", "mv keeps the original; cp doesn't",
+                   "cp deletes files"], 0,
+                  "cp makes a copy and leaves the original; mv moves it so the original name is gone."),
+        _type_q("Review: copy a.txt to b.txt.", "cp SOURCE DESTINATION.", "cp a.txt b.txt",
+                lambda tmp, cwd, out: _has(tmp, "a.txt", "b.txt"), files={"a.txt": "a\n"}),
+        _type_q("Review: create an empty file called done.txt.", "touch FILE.", "touch done.txt",
+                lambda tmp, cwd, out: _has(tmp, "done.txt")),
+    ],
+}
+
+
+def grade_typed(question, line):
+    """Run `line` as real bash in a throwaway folder set up for `question`.
+    Returns (ok, first_line_of_bash_error_or_empty)."""
+    tmp = tempfile.mkdtemp(prefix="tq_quiz_")
+    try:
+        for d in question["dirs"]:
+            os.makedirs(os.path.join(tmp, d), exist_ok=True)
+        for name, content in question["files"].items():
+            _write(os.path.join(tmp, name), content)
+        cwd, out, err = run_command(line, tmp, tmp)
+        ok = bool(question["check"](tmp, cwd, out))
+        problem = ""
+        if not ok and err.strip():
+            problem = next((ln for ln in err.splitlines() if ln.strip()), "")
+        return ok, problem
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ==========================================================================
 # Game state — pure logic, no curses. Testable on its own.
 # ==========================================================================
 
 class Game:
-    def __init__(self, root, reset=False):
+    def __init__(self, root, reset=False, quiz=True, rng=None):
         self.root = root
+        self.quiz_enabled = quiz
+        self.rng = rng or random.Random()
+        self.quiz = None            # active quiz session (see begin_quiz_offer)
+        self.quiz_taken = 0         # how many questions were attempted / right,
+        self.quiz_right = 0         # across every quiz taken this run
         if reset and os.path.isdir(root):
             shutil.rmtree(root)
         os.makedirs(root, exist_ok=True)
@@ -688,9 +825,10 @@ class Game:
         self.invuln = 0
         self.tick_count = 0
 
-        self.mode = "overworld"     # overworld | sign | terminal | congrats | gameover | win
+        self.mode = "overworld"     # overworld | sign | terminal | congrats | quizoffer | quiz | quizdone | gameover | win
         self.stage = 1                   # which of the 3 levels is currently the visible one
         self.congrats_text = ""
+        self.congrats_level = 0
         self.learned = []           # plain-English recaps, in the order you earned them
         self.sign_text = ""
         self.active_station = None
@@ -808,8 +946,7 @@ class Game:
             return
 
         if (nx, ny) == EXIT_POS:
-            self.mode = "win"
-            self.stage = len(STAGES) + 1  # every level reads as cleared/sealed now
+            self._finish_run()
             return
 
     def coins_remaining(self):
@@ -819,9 +956,116 @@ class Game:
         if self.mode == "sign":
             self.mode = "overworld"
 
+    def _finish_run(self):
+        """Reached the exit with every coin: level 3's optional quiz, then win."""
+        if self.quiz_enabled:
+            self.begin_quiz_offer(3, "win")
+        else:
+            self._enter_mode("win")
+
+    def _enter_mode(self, mode):
+        self.mode = mode
+        if mode == "win":
+            self.stage = len(STAGES) + 1  # every level reads as cleared/sealed now
+
     def dismiss_congrats(self):
         if self.mode == "congrats":
-            self.mode = "overworld"
+            if self.quiz_enabled and self.congrats_level in QUIZ_POOLS:
+                self.begin_quiz_offer(self.congrats_level, "overworld")
+            else:
+                self.mode = "overworld"
+
+    # -- optional end-of-level quiz ---------------------------------------
+    def begin_quiz_offer(self, level, then):
+        """Ask whether the player wants a quick 3-question recap of `level`.
+        `then` is the mode to enter afterwards ("overworld" or "win")."""
+        self.quiz = dict(level=level, then=then, items=[], idx=0, attempts=0,
+                         phase="asking", lines=[], right=0)
+        self.input_buf = ""
+        self.mode = "quizoffer"
+
+    def quiz_skip(self):
+        """Decline the offer, or bail out mid-quiz (Esc)."""
+        if self.quiz is None:
+            return
+        then = self.quiz["then"]
+        self.quiz = None
+        self.input_buf = ""
+        self._enter_mode(then)
+
+    def quiz_start(self):
+        if self.mode != "quizoffer" or self.quiz is None:
+            return
+        pool = QUIZ_POOLS[self.quiz["level"]]
+        items = []
+        for q in self.rng.sample(pool, QUIZ_LEN):
+            item = dict(q)
+            if q["kind"] == "choice":
+                order = list(range(len(q["options"])))
+                self.rng.shuffle(order)
+                item["options"] = [q["options"][i] for i in order]
+                item["correct"] = order.index(q["correct"])
+            items.append(item)
+        self.quiz.update(items=items, idx=0, attempts=0, phase="asking", lines=[], right=0)
+        self.input_buf = ""
+        self.mode = "quiz"
+
+    def quiz_question(self):
+        return self.quiz["items"][self.quiz["idx"]]
+
+    def quiz_char(self, ch):
+        if self.mode == "quiz" and self.quiz["phase"] == "asking" and len(self.input_buf) < 60:
+            self.input_buf += ch
+
+    def quiz_backspace(self):
+        self.input_buf = self.input_buf[:-1]
+
+    def quiz_submit(self, answer=None):
+        """Grade the answer: the typed line (input_buf) for "type" questions,
+        or the chosen option index for "choice" questions."""
+        if self.mode != "quiz" or self.quiz["phase"] != "asking":
+            return
+        q, z = self.quiz_question(), self.quiz
+        if q["kind"] == "type":
+            line, self.input_buf = self.input_buf, ""
+            if not line.strip():
+                return
+            ok, problem = grade_typed(q, line)
+        else:
+            if answer is None or not (0 <= answer < len(q["options"])):
+                return
+            ok, problem = answer == q["correct"], ""
+        if ok:
+            z["right"] += 1
+            self.quiz_right += 1
+            self._quiz_feedback(["Correct!"] + ([q["why"]] if q.get("why") else []))
+            return
+        z["attempts"] += 1
+        if z["attempts"] == 1:
+            z["lines"] = ([f"bash said: {problem}"] if problem else []) + [f"Not quite. Hint: {q['hint']}", "Try once more."]
+        else:
+            self._quiz_feedback([f"The answer: {q['answer']}"] + ([q["why"]] if q.get("why") else []))
+
+    def _quiz_feedback(self, lines):
+        z = self.quiz
+        z["phase"] = "feedback"
+        z["lines"] = lines
+        self.quiz_taken += 1
+
+    def quiz_continue(self):
+        if self.mode != "quiz" or self.quiz["phase"] != "feedback":
+            return
+        z = self.quiz
+        z["idx"] += 1
+        z["attempts"], z["phase"], z["lines"] = 0, "asking", []
+        self.input_buf = ""
+        if z["idx"] >= len(z["items"]):
+            z["phase"] = "summary"
+            self.mode = "quizdone"
+
+    def quiz_finish(self):
+        if self.mode == "quizdone":
+            self.quiz_skip()
 
     # -- terminal mode ---------------------------------------------------
     def enter_terminal(self, station_id):
@@ -929,6 +1173,7 @@ class Game:
             self.stage += 1
             self.mode = "congrats"
             self.congrats_text = f"LEVEL {cur['num']} COMPLETE!\n\nWell played."
+            self.congrats_level = cur["num"]
 
     # -- lifecycle -------------------------------------------------------
     def retry(self):
@@ -1221,6 +1466,70 @@ def draw_congrats(stdscr, game):
     stdscr.refresh()
 
 
+def _popup(stdscr, game, rows, width=64):
+    """A centered box over the dimmed map. `rows` is a list of (text, style);
+    long text wraps. Used by the quiz screens."""
+    h, w = draw_base(stdscr, game, dim=True)
+    box_w = min(width, w - 4)
+    lines = []
+    for text, style in rows:
+        for ln in (textwrap.wrap(text, width=box_w - 4) or [""]):
+            lines.append((ln, style))
+    top = max(1, h // 2 - len(lines) // 2 - 2)
+    left = max(1, (w - box_w) // 2)
+    try:
+        stdscr.addstr(top - 1, left, "┌" + "─" * (box_w - 2) + "┐", curses.A_BOLD)
+        for i, (ln, style) in enumerate(lines):
+            stdscr.addstr(top + i, left, "│ " + ln.ljust(box_w - 4) + " │", style)
+        stdscr.addstr(top + len(lines), left, "└" + "─" * (box_w - 2) + "┘", curses.A_BOLD)
+    except curses.error:
+        pass
+    stdscr.refresh()
+
+
+def draw_quizoffer(stdscr, game):
+    _popup(stdscr, game, [
+        (f"QUICK RECAP - LEVEL {game.quiz['level']}", CP_OK | curses.A_BOLD),
+        ("", 0),
+        (f"{QUIZ_LEN} short questions on what you just learned. Totally optional.", 0),
+        ("", 0),
+        ("Y = take the quiz     N = skip", curses.A_BOLD | curses.A_REVERSE),
+    ])
+
+
+def draw_quiz(stdscr, game):
+    z = game.quiz
+    q = game.quiz_question()
+    rows = [(f"QUIZ  -  QUESTION {z['idx'] + 1} OF {len(z['items'])}", CP_OK | curses.A_BOLD), ("", 0),
+            (q["prompt"], curses.A_BOLD), ("", 0)]
+    if q["kind"] == "choice":
+        for i, opt in enumerate(q["options"]):
+            marker = "> " if (z["phase"] == "feedback" and i == q["correct"]) else "  "
+            rows.append((f"{marker}{i + 1}) {opt}", 0))
+        rows.append(("", 0))
+    for ln in z["lines"]:
+        bad = ln.startswith("bash said") or ln.startswith("Not quite")
+        rows.append((ln, CP_ERR if bad else CP_OK))
+    if z["phase"] == "feedback":
+        last = z["idx"] + 1 >= len(z["items"])
+        rows += [("", 0), ("PRESS SPACE TO " + ("FINISH" if last else "CONTINUE"), curses.A_BOLD | curses.A_REVERSE)]
+    elif q["kind"] == "choice":
+        rows += [("", 0), ("Press 1-%d to answer   Esc: skip quiz" % len(q["options"]), curses.A_DIM)]
+    else:
+        rows += [("", 0), (f"$ {game.input_buf}", curses.A_BOLD),
+                 ("Type a command, Enter to run   Esc: skip quiz", curses.A_DIM)]
+    _popup(stdscr, game, rows)
+
+
+def draw_quizdone(stdscr, game):
+    z = game.quiz
+    _popup(stdscr, game, [
+        ("QUIZ COMPLETE", CP_OK | curses.A_BOLD), ("", 0),
+        (f"You got {z['right']} of {len(z['items'])} right.", 0), ("", 0),
+        ("PRESS SPACE TO CONTINUE", curses.A_BOLD | curses.A_REVERSE),
+    ])
+
+
 def _first_word(line):
     return line.strip().split()[0] if line.strip() else ""
 
@@ -1419,7 +1728,8 @@ def draw_win(stdscr, game):
     lines = [
         "SIGNAL RESTORED",
         "",
-        f"score: {game.score}     lives left: {game.lives}",
+        f"score: {game.score}     lives left: {game.lives}"
+        + (f"     quiz: {game.quiz_right}/{game.quiz_taken}" if game.quiz_taken else ""),
         "",
         "the ship exhales. welcome back, operator.",
     ]
@@ -1504,6 +1814,34 @@ def wait_for_quit(stdscr):
         buf, armed = feed_quit_combo(buf, ch, "win")
 
 
+def handle_quiz_key(game, ch):
+    """Route one keypress on any of the quiz screens (offer / question /
+    summary). Pulled out of main() so it can be tested without curses."""
+    if game.mode == "quizoffer":
+        if ch in (ord("y"), ord("Y")):
+            game.quiz_start()
+        elif ch in (ord("n"), ord("N"), 27):
+            game.quiz_skip()
+    elif game.mode == "quiz":
+        if ch == 27:
+            game.quiz_skip()
+        elif game.quiz["phase"] == "feedback":
+            if ch == ord(" "):
+                game.quiz_continue()
+        elif game.quiz_question()["kind"] == "choice":
+            if ord("1") <= ch <= ord("9"):
+                game.quiz_submit(ch - ord("1"))
+        elif ch in (curses.KEY_ENTER, 10, 13):
+            game.quiz_submit()
+        elif ch in (curses.KEY_BACKSPACE, 127, 8):
+            game.quiz_backspace()
+        elif 32 <= ch <= 126:
+            game.quiz_char(chr(ch))
+    elif game.mode == "quizdone":
+        if ch == ord(" "):
+            game.quiz_finish()
+
+
 def main(stdscr):
     curses.curs_set(0)
     try:
@@ -1542,6 +1880,12 @@ def main(stdscr):
             draw_congrats(stdscr, game)
         elif game.mode == "terminal":
             draw_terminal(stdscr, game)
+        elif game.mode == "quizoffer":
+            draw_quizoffer(stdscr, game)
+        elif game.mode == "quiz":
+            draw_quiz(stdscr, game)
+        elif game.mode == "quizdone":
+            draw_quizdone(stdscr, game)
         elif game.mode == "gameover":
             draw_gameover(stdscr, game)
         elif game.mode == "win":
@@ -1597,6 +1941,9 @@ def main(stdscr):
             elif 32 <= ch <= 126:
                 game.terminal_char(chr(ch))
 
+        elif game.mode in ("quizoffer", "quiz", "quizdone"):
+            handle_quiz_key(game, ch)
+
         elif game.mode == "gameover":
             if ch in (ord("q"), ord("Q")):
                 return
@@ -1612,7 +1959,7 @@ def main(stdscr):
 def selftest():
     import tempfile
     tmp = tempfile.mkdtemp(prefix="tq_arcade_selftest_")
-    g = Game(tmp, reset=True)
+    g = Game(tmp, reset=True, quiz=False)
 
     assert (g.px, g.py) == PLAYER_START
 
@@ -1729,6 +2076,22 @@ def selftest():
     if coin_pos != sign_pos:
         walk_to(g3, coin_pos)
         assert g3.coins[coin_pos] is False and g3.score == 1
+
+    # --- optional quiz, headless: take one and get everything right ---
+    g5 = Game(tmp + "_q", reset=True, rng=random.Random(1))
+    g5.begin_quiz_offer(1, "overworld")
+    g5.quiz_start()
+    for _ in range(QUIZ_LEN):
+        q = g5.quiz_question()
+        if q["kind"] == "type":
+            g5.input_buf = q["answer"]
+            g5.quiz_submit()
+        else:
+            g5.quiz_submit(q["correct"])
+        g5.quiz_continue()
+    assert g5.mode == "quizdone" and g5.quiz["right"] == QUIZ_LEN, g5.mode
+    g5.quiz_finish()
+    assert g5.mode == "overworld"
 
     print("SELFTEST PASSED")
     shutil.rmtree(tmp, ignore_errors=True)

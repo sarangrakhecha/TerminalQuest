@@ -46,7 +46,7 @@ def sandbox(tmp_path):
 @pytest.fixture
 def game(sandbox):
     """A freshly built Game, same as a new playthrough."""
-    return tq.Game(sandbox, reset=True)
+    return tq.Game(sandbox, reset=True, quiz=False)
 
 
 SOLVE_COMMANDS = {
@@ -371,30 +371,30 @@ class TestStations:
         # Progress isn't saved, so training files must not persist either:
         # a solved G (draft.txt -> final.txt) has to be undone on relaunch,
         # or the leftover final.txt would mark G solved behind the game's back.
-        g1 = tq.Game(sandbox, reset=False)
+        g1 = tq.Game(sandbox, reset=False, quiz=False)
         solve(g1, "G")
         g_root = g1.stations["G"].root
         assert os.path.isfile(os.path.join(g_root, "final.txt"))
 
-        g2 = tq.Game(sandbox, reset=False)  # plain relaunch, no --reset
+        g2 = tq.Game(sandbox, reset=False, quiz=False)  # plain relaunch, no --reset
         assert os.path.isfile(os.path.join(g_root, "draft.txt"))
         assert not os.path.exists(os.path.join(g_root, "final.txt"))
         assert not g2.stations["G"].solved
 
     def test_an_unrelated_command_cannot_solve_a_station_after_relaunch(self, sandbox):
-        g1 = tq.Game(sandbox, reset=False)
+        g1 = tq.Game(sandbox, reset=False, quiz=False)
         solve(g1, "H")  # rm jam.lock
-        g2 = tq.Game(sandbox, reset=False)
+        g2 = tq.Game(sandbox, reset=False, quiz=False)
         enter(g2, "H")
         g2.input_buf = "pwd"
         g2.terminal_submit()
         assert not g2.stations["H"].solved
 
     def test_a_deleted_setup_file_is_restored_on_relaunch(self, sandbox):
-        g1 = tq.Game(sandbox, reset=False)
+        g1 = tq.Game(sandbox, reset=False, quiz=False)
         vault = os.path.join(g1.stations["C"].root, "vault")
         shutil.rmtree(vault)
-        tq.Game(sandbox, reset=False)
+        tq.Game(sandbox, reset=False, quiz=False)
         assert os.path.isdir(vault)
 
     @pytest.mark.parametrize("station_id,wrong", [
