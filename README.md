@@ -1,5 +1,7 @@
 # TerminalQuest — Signal Lost
 
+[![tests](https://github.com/sarangrakhecha/TerminalQuest/actions/workflows/tests.yml/badge.svg)](https://github.com/sarangrakhecha/TerminalQuest/actions/workflows/tests.yml)
+
 **Learn the terminal by saving a ship — not by reading slides.**
 
 A tiny real-time arcade game that teaches you the terminal by making you
@@ -13,7 +15,7 @@ in the world reacts — a door unlocks, a gate opens, a locked room stops
 being locked. After each level there's an optional 3-question recap quiz to
 help it stick — take it or skip it.
 
-**8 commands · 8 stations · 3 levels · 238 automated tests · zero dependencies**
+**8 commands · 8 stations · 3 levels · 331 automated tests · zero dependencies**
 
 ## Contents
 
@@ -88,6 +90,20 @@ quick **3-question recap** of what that level taught: press `Y` to take it or
   shown and you move on.
 - It never costs a life or blocks progress; your running quiz score shows on
   the win screen if you took any.
+
+### Helping you along
+
+- **Coaching tips.** Miss a station twice and the panel adds one line saying
+  what was off — a typo'd command name (*"did you mean `cp`?"*), the right
+  command with the wrong names, or a totally different command. It never
+  gives a new answer (the COMMAND box always shows it) and never costs
+  anything.
+- **Map cues.** Every terminal on the map carries its station letter and dims
+  once solved, and the HUD always says which terminal is next.
+- **Learn mode.** `--no-enemies` (or `e` in game) switches the patrols off.
+- **A cheat sheet at the end.** When the game closes, the 8 commands with an
+  example each are printed into your shell — ticked if you used them — so the
+  takeaway is right there to copy from.
 
 ## What it looks like
 
@@ -177,7 +193,7 @@ spells out the win, right on the terminal.
 
 ## Install & run
 
-Requires **Python 3.8+**, Bash, and a real terminal window with `curses`
+Requires **Python 3.9+**, Bash, and a real terminal window with `curses`
 support, at least **112×28** characters (if you see a resize prompt, just
 enlarge the window; the game checks its size every frame, so shrinking and
 regrowing the window mid-game is safe too). No `pip install` needed to
@@ -200,6 +216,13 @@ additionally deletes the whole game folder:
 python3 terminalquest.py --reset
 ```
 
+**Learn mode:** patrols can cost a life while you're trying to read a lesson.
+Start with them off, or toggle them any time with `e` on the map:
+
+```bash
+python3 terminalquest.py --no-enemies
+```
+
 To put that folder somewhere else entirely:
 
 ```bash
@@ -211,7 +234,9 @@ TERMINALQUEST_ROOT=/path/to/somewhere python3 terminalquest.py --reset
 | Context | Key | Does |
 |---|---|---|
 | Overworld | Arrow keys | Move — walk into things to interact with them |
-| Overworld | `q` | Quit |
+| Overworld | `q` | Quit (asks `Y`/`N` first, so a stray key can't end your run) |
+| Overworld | `e` | Turn patrols off/on (learn mode) |
+| Overworld | `b` | Turn the solve bell on/off |
 | Overworld | `t` | Toggle high-contrast mode (bold/reverse/underline, no color) |
 | At a terminal | *(typing)* | A real bash prompt — nothing is simulated |
 | At a terminal | `Tab` | Load the shown command into the prompt, without running it |
@@ -223,11 +248,11 @@ TERMINALQUEST_ROOT=/path/to/somewhere python3 terminalquest.py --reset
 
 | Symbol | Meaning |
 |---|---|
-| `▶ ▲ ▼ ◀` | You (the arrow points the way you're facing) |
+| `[▶] [▲] [▼] [◀]` | You — the arrow sits between brackets and points the way you're facing |
 | `x` | A patrol — touching one costs a life |
 | `▓` | A locked door |
 | `'` | An unlocked door |
-| `▣` | An old terminal |
+| `▣A` … `▣H` | An old terminal, labeled with its station letter (solved ones dim out); the HUD says which one is next |
 | `*` | Worth grabbing |
 | `!` | A sign |
 | `X` | The way out |
@@ -296,6 +321,7 @@ terminalquest.py      game logic, the 8-station map, shell runner, and the curse
 tests/test_game.py    the pytest regression suite (game logic, rendering, stations)
 tests/test_quiz.py    the pytest suite for the optional recap quiz (96 tests)
 tests/test_ui.py      the curses-layer tests: colors, terminal panel, main() loop, selftest (28 tests)
+tests/test_features.py  learn mode, coaching tips, map cues, quit prompt, bell, cheat sheet, CI workflow, and gap-fillers for older code paths (93 tests)
 screenshots/          images rendered from the game's own drawing code
 README.md             this file
 ```
@@ -311,7 +337,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-238 tests, no real terminal required. What's actually covered:
+331 tests, no real terminal required. What's actually covered:
 
 | Area | What's tested |
 |---|---|
@@ -326,11 +352,16 @@ pytest
 | Rendering | A `FakeScreen` stand-in renders `draw_base` and friends to plain text at an exact terminal size (including deliberately too-small ones), so a locked tile showing through, or a crash on a shrunk window, gets caught without a real terminal; covers the per-level fog/masking, the congrats screen, and the win banner |
 | Recap quiz | Every question's own stated answer passes the real-bash grader, and no do-nothing command (`true`, `pwd`, `echo hi`) passes any typed question; choice questions have exactly one valid answer; 3 distinct questions drawn from the right level's pool, reproducible with a seed; skip / hint-then-retry / reveal-after-two-misses flow; never costs lives or score; key handling and every quiz screen at several window sizes |
 | Curses layer | `setup_colors` (color, high-contrast, no-color and error paths); the terminal panel in every state at several sizes; the real `main()` loop driven by a scripted fake screen — intro, movement, signs, congrats, playing a station from the keyboard, game over, the `:wq`-then-Enter exit, and taking or declining the quiz; the built-in `selftest()` |
+| Newer features | The `[▶]` player marker for every facing and at the map edge; learn mode (patrols freeze, don't hurt, aren't drawn; `--no-enemies` and `e`); station coaching tips (none after one miss, one after two, cleared on solve, never overriding the `mkdir`/`touch` target nudge); map cues (terminal letters, dimming when solved, "next terminal" in the HUD, no fog leaks); the quit prompt (`q` alone no longer quits); the solve bell (once per solve, silent when off, survives terminals that can't beep); the exit cheat sheet; and the CI workflow file itself |
 | Resize safety | Every `draw_*` function is exercised at several window sizes — comfortably large, far too small, too narrow, too short — and must never raise |
 
 Navigation in the tests uses `terminalquest.walk_to`, a small BFS
 pathfinder, instead of hardcoded step counts — so if you rearrange a room or
 move a door, the tests should keep passing without being touched.
+
+Every push and pull request runs the whole suite on **macOS and Linux** across
+**Python 3.9–3.12** via GitHub Actions (`.github/workflows/tests.yml`), with a
+**90% coverage floor** and the built-in self-test.
 
 ### Quality approach
 
@@ -350,12 +381,12 @@ How the suite is designed, and what was run before this release:
   rather than hardcoded step counts, so moving a door doesn't break them.
 - **Deterministic and fast.** No real terminal, network, or timing
   dependence; the full suite runs in about a second.
-- **Release check.** Before the latest release: `pytest` → 238 passed,
+- **Release check.** Before the latest release: `pytest` → 331 passed,
   `python3 terminalquest.py --reset --selftest` → `SELFTEST PASSED`, run from a
   clean checkout with no stale `__pycache__`.
 
 - **Measured coverage.** `pytest --cov=terminalquest --cov-branch` reports
-  **95%** (1236 statements, 472 branches, 238 tests). The live curses `main()`
+  **98%** (1313 statements, 510 branches, 331 tests). The live curses `main()`
   loop is exercised by a scripted fake screen that feeds it real keypresses, so
   input handling is covered too. What's left is small: a few defensive
   branches, the subprocess-timeout path and the `__main__` entry point. Note
@@ -408,7 +439,7 @@ merge:
 1. Read the [design rules](#design-rules-read-this-before-opening-a-pr) above
    first — most rejected PRs will be rejected for growing the scope, not
    for code quality.
-2. Add or update a test in `tests/test_game.py` (or `tests/test_quiz.py` for the quiz) for any behavior change.
+2. Add or update a test in `tests/` for any behavior change (`test_game.py` for game logic, `test_quiz.py` for the quiz, `test_ui.py` / `test_features.py` for the screen and newer features).
 3. Run `pytest` and `python3 terminalquest.py --selftest` before opening
    the PR — both should pass clean.
 4. Keep it small. A 20-line diff that fixes one thing beats a 200-line

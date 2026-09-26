@@ -29,6 +29,7 @@ Needs a real terminal window, at least 112x28.
 """
 
 import curses
+import difflib
 import os
 import random
 import re
@@ -127,6 +128,8 @@ class Station:
         self.attempts = 0
         self.solved = False
         self.hint_shown = False
+        self.fails = 0            # submissions that didn't solve this station
+        self.tip = ""             # one-line coaching after repeated misses
         self.last_command = ""
         self.resolved_explain = ""
 
@@ -207,6 +210,21 @@ def _check_rm(st):
         return
     if not os.path.exists(os.path.join(st.root, "jam.lock")):
         st.solved = True
+
+
+def coach_tip(st, line):
+    """One line of coaching for a station that keeps not getting solved:
+    what the learner typed vs. what this door wants. Deliberately never a
+    new answer — the COMMAND box already shows that — just what was off."""
+    target = first_word(st.hint)
+    typed = first_word(line)
+    if not typed:
+        return ""
+    if typed == target:
+        return f"tip: right command! now check the names and order — this door wants: {st.hint}"
+    if difflib.get_close_matches(typed, [target], n=1, cutoff=0.5):
+        return f"tip: did you mean `{target}`? that's the command this door wants."
+    return f"tip: this door needs `{target}` — look at the COMMAND box above."
 
 
 def near_miss_hint(sid, st):
@@ -795,8 +813,11 @@ def grade_typed(question, line):
 # ==========================================================================
 
 class Game:
-    def __init__(self, root, reset=False, quiz=True, rng=None):
+    def __init__(self, root, reset=False, quiz=True, rng=None, enemies=True):
         self.root = root
+        self.enemies_on = enemies   # 'learn mode' turns patrols off ('e' in game)
+        self.sound_on = True        # terminal bell when a station is solved ('b')
+        self.bell = False           # set by the game, consumed by main()
         self.quiz_enabled = quiz
         self.rng = rng or random.Random()
         self.quiz = None            # active quiz session (see begin_quiz_offer)
@@ -825,7 +846,7 @@ class Game:
         self.invuln = 0
         self.tick_count = 0
 
-        self.mode = "overworld"     # overworld | sign | terminal | congrats | quizoffer | quiz | quizdone | gameover | win
+        self.mode = "overworld"     # overworld | quitconfirm | sign | terminal | congrats | quizoffer | quiz | quizdone | gameover | win
         self.stage = 1                   # which of the 3 levels is currently the visible one
         self.congrats_text = ""
         self.congrats_level = 0
@@ -852,6 +873,8 @@ class Game:
         return None
 
     def enemy_at(self, x, y):
+        if not self.enemies_on:
+            return None
         for e in self.enemies:
             if (e["x"], e["y"]) == (x, y):
                 return e
@@ -867,7 +890,7 @@ class Game:
         if self.flash > 0:
             self.flash -= 1
 
-        for e in self.enemies:
+        for e in self.enemies if self.enemies_on else ():
             e["counter"] += 1
             if e["counter"] < e["period"]:
                 continue
@@ -1120,7 +1143,9 @@ class Game:
         st.run(line)
         was_solved = st.solved
         self._checkers[self.active_station](st)
+        st.tip = ""
         if st.solved and not was_solved:
+            self.bell = True
             self._apply_effect(self.active_station)
             word, sentence = st.explain
             st.resolved_explain = sentence
@@ -1133,9 +1158,12 @@ class Game:
                 st.transcript.append(("", "*** something unlocks, somewhere. ***"))
             self.return_timer = 20
         elif not st.solved:
+            st.fails += 1
             nudge = near_miss_hint(self.active_station, st)
             if nudge:
                 st.transcript.append(("", nudge))
+            elif st.fails >= 2:
+                st.tip = coach_tip(st, line)
 
     def tick_terminal(self):
         if self.mode == "terminal" and self.return_timer > 0:
@@ -1181,6 +1209,26 @@ class Game:
         self.px, self.py = PLAYER_START
         self.invuln = 10
         self.mode = "overworld"
+
+    def next_station(self):
+        """Id of the first station not yet solved, or None when all are."""
+        return next((sid for sid in STATION_ORDER if not self.stations[sid].solved), None)
+
+    def toggle_enemies(self):
+        self.enemies_on = not self.enemies_on
+        self.message = "ENEMIES OFF (learn mode)" if not self.enemies_on else "ENEMIES ON"
+
+    def toggle_sound(self):
+        self.sound_on = not self.sound_on
+        self.message = "SOUND ON" if self.sound_on else "SOUND OFF"
+
+    def ask_quit(self):
+        if self.mode == "overworld":
+            self.mode = "quitconfirm"
+
+    def cancel_quit(self):
+        if self.mode == "quitconfirm":
+            self.mode = "overworld"
 
     def solved_count(self):
         return sum(1 for s in self.stations.values() if s.solved)
@@ -1242,7 +1290,7 @@ FACING_GLYPH = {"up": "▲", "down": "▼", "left": "◀", "right": "▶"}
 
 WALL_GLYPH = "█"
 CELL_W = 2  # each map tile is drawn 2 terminal columns wide — makes it read as blocky/square
-LEGEND = "▶ you    x enemy    ▓ locked door    ▣ terminal    * coin    X exit"
+LEGEND = "[▶] you    x enemy    ▓ locked door    ▣A terminal    * coin    X exit"
 
 
 def tile_glyph(game, x, y):
@@ -1341,6 +1389,13 @@ def draw_base(stdscr, game, dim=False):
             glyph, kind = tile_glyph(game, x, y)
             cell = glyph * CELL_W if kind == "wall" else glyph + " "
             style = _TILE_STYLE_KEYS[kind]() | base_dim
+            if kind == "computer":
+                # the station's letter sits next to it, so the A-to-H order
+                # is readable on the map; a solved one dims out
+                sid = game.computers[(x, y)]
+                cell = glyph + sid
+                if game.stations[sid].solved:
+                    style = CP_COMP | curses.A_DIM | base_dim
             try:
                 stdscr.addstr(oy + y, ox + x * CELL_W, cell, style)
             except curses.error:
@@ -1356,7 +1411,7 @@ def draw_base(stdscr, game, dim=False):
             pass
 
     blink = (game.tick_count // 2) % 2 == 0
-    for e in game.enemies:
+    for e in (game.enemies if game.enemies_on else ()):
         zone = _zone_for(e["x"], e["y"])
         if zone is not None and zone > game.stage:
             continue
@@ -1370,7 +1425,11 @@ def draw_base(stdscr, game, dim=False):
     if game.invuln > 0 and game.invuln % 2 == 0:
         pstyle |= curses.A_DIM
     try:
-        stdscr.addstr(oy + game.py, ox + game.px * CELL_W, FACING_GLYPH[game.facing], pstyle | base_dim)
+        # "[▶]": the arrow between brackets, so you never lose yourself among
+        # the dots. Each tile is 2 columns wide; the "[" borrows the blank
+        # column to the left and the "]" the blank column to the right.
+        stdscr.addstr(oy + game.py, ox + game.px * CELL_W - 1,
+                      "[" + FACING_GLYPH[game.facing] + "]", pstyle | base_dim)
     except curses.error:
         pass
 
@@ -1384,8 +1443,12 @@ def draw_base(stdscr, game, dim=False):
     hud_y = oy + GRID_H + 1
     hearts = "♥" * max(0, game.lives)
     try:
-        stdscr.addstr(hud_y, 0, f"{hearts}   *{game.score}   {game.solved_count()}/8 stations   [q] quit",
-                      base_dim)
+        nxt = game.next_station()
+        hud = (f"{hearts}   *{game.score}   {game.solved_count()}/8 stations"
+               + (f"   next: terminal {nxt}" if nxt else "   all stations done - head for X")
+               + f"   [q] quit  [e] enemies {'on' if game.enemies_on else 'off'}"
+               + f"  [b] sound {'on' if game.sound_on else 'off'}")
+        stdscr.addstr(hud_y, 0, hud[: w - 1], base_dim)
         stdscr.addstr(hud_y + 1, 0, LEGEND[: w - 1], curses.A_DIM | base_dim)
     except curses.error:
         pass
@@ -1485,6 +1548,14 @@ def _popup(stdscr, game, rows, width=64):
     except curses.error:
         pass
     stdscr.refresh()
+
+
+def draw_quitconfirm(stdscr, game):
+    _popup(stdscr, game, [
+        ("QUIT TERMINALQUEST?", CP_OK | curses.A_BOLD), ("", 0),
+        ("Your progress this run isn't saved.", 0), ("", 0),
+        ("Y = quit     N = keep playing", curses.A_BOLD | curses.A_REVERSE),
+    ], width=44)
 
 
 def draw_quizoffer(stdscr, game):
@@ -1640,6 +1711,8 @@ def draw_terminal(stdscr, game):
             put(result_y + 2, left + 5, f"Why: {meaning}")
         else:
             put(result_y + 2, left + 5, "Press ? to explain this result.", curses.A_DIM)
+        if st.tip:
+            put(result_y + 3, left + 5, st.tip, CP_DOOR | curses.A_BOLD)
 
     full_bar(top + box_h - 3, " ▶ TYPE THE COMMAND ABOVE, THEN PRESS ENTER", CP_OK | curses.A_BOLD | curses.A_REVERSE)
     put(top + box_h - 2, left + 3, f"$ {game.input_buf}", curses.A_BOLD)
@@ -1801,6 +1874,32 @@ def feed_quit_combo(buf, ch, mode):
     return buf, buf == QUIT_COMBO
 
 
+LAST_GAME = None  # the most recent Game main() ran, for the exit-time cheat sheet
+
+
+CHEAT_SHEET = [
+    ("ls", "ls", "list what's in this folder", "ls"),
+    ("cat", "cat notes.txt", "print a file's contents", "cat"),
+    ("cd", "cd projects", "move into a folder", "cd"),
+    ("mkdir", "mkdir photos", "create a new folder", "mkdir"),
+    ("touch", "touch todo.txt", "create a new, empty file", "touch"),
+    ("cp", "cp a.txt b.txt", "copy a file (the original stays)", "cp"),
+    ("mv", "mv old.txt new.txt", "move or rename a file", "mv"),
+    ("rm", "rm junk.tmp", "delete a file (no undo!)", "rm"),
+]
+
+
+def cheat_sheet_text(learned=()):
+    """The takeaway printed into the shell after the game closes. Commands
+    you actually ran in this session are ticked."""
+    lines = ["", "TerminalQuest cheat sheet — the 8 commands", "-" * 46]
+    for word, example, meaning, key in CHEAT_SHEET:
+        mark = "✓" if key in learned else " "
+        lines.append(f" {mark} {example:<20} {meaning}")
+    lines += ["-" * 46, "Try them for real in any terminal. Nice work, operator.", ""]
+    return "\n".join(lines)
+
+
 def wait_for_quit(stdscr):
     """Block on the win screen until the player types ":wq" and then Enter,
     like vim. Idle ticks (getch() == -1) between keystrokes are ignored."""
@@ -1853,7 +1952,9 @@ def main(stdscr):
 
     root = os.path.expanduser(os.environ.get("TERMINALQUEST_ROOT", DEFAULT_ROOT))
     reset = "--reset" in sys.argv
-    game = Game(root, reset=reset)
+    global LAST_GAME
+    game = Game(root, reset=reset, enemies="--no-enemies" not in sys.argv)
+    LAST_GAME = game
     stdscr.timeout(100)  # ms per tick
 
     draw_intro(stdscr, game)
@@ -1871,6 +1972,13 @@ def main(stdscr):
         game.tick()
         if game.mode == "terminal":
             game.tick_terminal()
+        if game.bell:
+            game.bell = False
+            if game.sound_on:
+                try:
+                    curses.beep()
+                except curses.error:
+                    pass
 
         if game.mode == "overworld":
             draw_overworld(stdscr, game)
@@ -1880,6 +1988,8 @@ def main(stdscr):
             draw_congrats(stdscr, game)
         elif game.mode == "terminal":
             draw_terminal(stdscr, game)
+        elif game.mode == "quitconfirm":
+            draw_quitconfirm(stdscr, game)
         elif game.mode == "quizoffer":
             draw_quizoffer(stdscr, game)
         elif game.mode == "quiz":
@@ -1903,7 +2013,11 @@ def main(stdscr):
 
         if game.mode == "overworld":
             if ch in (ord("q"), ord("Q")):
-                return
+                game.ask_quit()
+            elif ch in (ord("e"), ord("E")):
+                game.toggle_enemies()
+            elif ch in (ord("b"), ord("B")):
+                game.toggle_sound()
             elif ch in (ord("t"), ord("T")):
                 game.high_contrast = not game.high_contrast
                 setup_colors(game.high_contrast)
@@ -1916,6 +2030,12 @@ def main(stdscr):
                 game.try_move(-1, 0)
             elif ch == curses.KEY_RIGHT:
                 game.try_move(1, 0)
+
+        elif game.mode == "quitconfirm":
+            if ch in (ord("y"), ord("Y")):
+                return
+            elif ch in (ord("n"), ord("N"), 27):
+                game.cancel_quit()
 
         elif game.mode == "sign":
             game.dismiss_sign()
@@ -2104,3 +2224,4 @@ if __name__ == "__main__":
         selftest()
     else:
         curses.wrapper(main)
+        print(cheat_sheet_text(LAST_GAME.learned if LAST_GAME else ()))

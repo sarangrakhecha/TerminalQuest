@@ -164,12 +164,12 @@ def run_main(monkeypatch, game, keys, size=(40, 160)):
 
 class TestMainLoop:
     def test_any_key_starts_then_q_quits(self, fake_curses, monkeypatch, qgame):
-        run_main(monkeypatch, qgame, ["x", "q"])
+        run_main(monkeypatch, qgame, ["x", "q", "y"])
 
     def test_arrow_keys_move_and_t_toggles_high_contrast(self, fake_curses, monkeypatch, qgame):
         start = (qgame.px, qgame.py)
         run_main(monkeypatch, qgame, [
-            " ", "t", curses.KEY_RIGHT, curses.KEY_DOWN, curses.KEY_LEFT, curses.KEY_UP, -1, "t", "q"])
+            " ", "t", curses.KEY_RIGHT, curses.KEY_DOWN, curses.KEY_LEFT, curses.KEY_UP, -1, "t", "q", "y"])
         assert qgame.high_contrast is False
         assert (qgame.px, qgame.py) != start or qgame.message
 
@@ -179,30 +179,30 @@ class TestMainLoop:
 
     def test_a_sign_is_dismissed_by_any_key(self, fake_curses, monkeypatch, qgame):
         qgame.mode, qgame.sign_text = "sign", "hello there"
-        run_main(monkeypatch, qgame, [" ", "z", "q"])
-        assert qgame.mode == "overworld"
+        run_main(monkeypatch, qgame, [" ", "z", "q", "y"])
+        assert qgame.mode == "quitconfirm"  # left the game from the quit prompt
 
     def test_congrats_only_dismisses_on_space(self, fake_curses, monkeypatch, qgame):
         qgame.mode, qgame.congrats_text = "congrats", "LEVEL 1 COMPLETE!"
-        run_main(monkeypatch, qgame, [" ", curses.KEY_RIGHT, "x", " ", "q"])
-        assert qgame.mode == "overworld"
+        run_main(monkeypatch, qgame, [" ", curses.KEY_RIGHT, "x", " ", "q", "y"])
+        assert qgame.mode == "quitconfirm"  # left the game from the quit prompt
 
     def test_playing_a_station_from_the_keyboard(self, fake_curses, monkeypatch, qgame):
         qgame.enter_terminal("A")
-        keys = [" ", "?", "l", "x", curses.KEY_BACKSPACE, "s", "\t", 27, "l", "s", curses.KEY_ENTER, "z", "q"]
+        keys = [" ", "?", "l", "x", curses.KEY_BACKSPACE, "s", "\t", 27, "l", "s", curses.KEY_ENTER, "z", "q", "y"]
         run_main(monkeypatch, qgame, keys)
         assert qgame.stations["A"].solved
-        assert qgame.mode == "overworld"
+        assert qgame.mode == "quitconfirm"  # left the game from the quit prompt
 
     def test_escape_on_an_empty_prompt_leaves_the_terminal(self, fake_curses, monkeypatch, qgame):
         qgame.enter_terminal("A")
-        run_main(monkeypatch, qgame, [" ", 27, "q"])
-        assert qgame.mode == "overworld"
+        run_main(monkeypatch, qgame, [" ", 27, "q", "y"])
+        assert qgame.mode == "quitconfirm"  # left the game from the quit prompt
 
     def test_game_over_retries_on_any_key_and_quits_on_q(self, fake_curses, monkeypatch, qgame):
         qgame.mode = "gameover"
-        run_main(monkeypatch, qgame, [" ", "r", "q"])
-        assert qgame.mode == "overworld" and qgame.lives == 3
+        run_main(monkeypatch, qgame, [" ", "r", "q", "y"])
+        assert qgame.mode == "quitconfirm"  # left the game from the quit prompt and qgame.lives == 3
 
     def test_game_over_can_quit_directly(self, fake_curses, monkeypatch, qgame):
         qgame.mode = "gameover"
@@ -225,15 +225,15 @@ class TestMainLoop:
             else:
                 keys += [str(q["correct"] + 1)]
             keys += [" "]
-        keys += [" ", "q"]  # summary -> back to the map -> quit
+        keys += [" ", "q", "y"]  # summary -> back to the map -> quit
         run_main(monkeypatch, g, keys)
-        assert g.quiz_right == 3 and g.mode == "overworld"
+        assert g.quiz_right == 3 and g.mode == "quitconfirm"  # left the game from the quit prompt
 
     def test_declining_the_quiz_offer_from_the_keyboard(self, fake_curses, monkeypatch, tmp_path):
         g = tq.Game(str(tmp_path / "qn"), reset=True, quiz=True)
         g.begin_quiz_offer(1, "overworld")
-        run_main(monkeypatch, g, [" ", "n", "q"])
-        assert g.mode == "overworld"
+        run_main(monkeypatch, g, [" ", "n", "q", "y"])
+        assert g.mode == "quitconfirm"  # left the game from the quit prompt
 
 
 # ---- the built-in self-test ----------------------------------------------------------------
