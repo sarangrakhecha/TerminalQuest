@@ -59,6 +59,51 @@ DANGEROUS_RE = re.compile("|".join(DANGEROUS_PATTERNS))
 CWD_MARK = "\x01__TQ_CWD__\x02"
 
 
+OUTSIDE_MSG = "that reaches outside the game folder - stay inside it while you learn."
+SAFE_DEVICES = {"/dev/null"}
+
+
+def _inside(path, root):
+    return path == root or path.startswith(root + os.sep)
+
+
+def _reaches_outside(line, cwd, sandbox_root):
+    """Best-effort guard for the accidents and jokes a learner might type:
+    absolute paths, '~', '$HOME' and '..' that resolve outside the folder
+    (symlinks included), and recursive `rm` aimed at the folder itself or
+    anything above it. Returns a message, or None if the line looks fine.
+
+    This is NOT a security boundary — command substitution, variables and
+    scripts can still get around it (see the README's Safety boundary).
+    Lines it can't parse (unbalanced quotes) are left for bash to reject.
+    """
+    root = os.path.realpath(sandbox_root)
+    try:
+        tokens = shlex.split(line)
+    except ValueError:
+        return None
+    recursive_rm = "rm" in tokens and any(
+        (t.startswith("-") and not t.startswith("--") and ("r" in t or "R" in t)) or t == "--recursive"
+        for t in tokens)
+    for tok in tokens:
+        if tok.startswith("-"):
+            continue
+        tok = re.sub(r"^\d*[<>]+&?", "", tok)          # 2>/dev/null, >out.txt
+        if "=" in tok:                                   # FOO=/path, of=/path
+            tok = tok.split("=", 1)[1]
+        tok = tok.replace("${HOME}", root).replace("$HOME", root)
+        if tok == "~" or tok.startswith("~/"):
+            tok = root + tok[1:]
+        if not tok or tok in SAFE_DEVICES:
+            continue
+        real = os.path.realpath(os.path.join(cwd, tok))
+        if not _inside(real, root):
+            return OUTSIDE_MSG
+        if recursive_rm and (real == root or root.startswith(real + os.sep)):
+            return "nope. not even here."
+    return None
+
+
 def run_command(line, cwd, sandbox_root):
     """Execute `line` as real bash, starting in `cwd`. The tracked working
     directory is snapped back if it would leave sandbox_root — this is NOT an
@@ -69,13 +114,19 @@ def run_command(line, cwd, sandbox_root):
         return cwd, "", ""
     if DANGEROUS_RE.search(stripped):
         return cwd, "", "nope. not even here."
+    blocked = _reaches_outside(stripped, cwd, sandbox_root)
+    if blocked:
+        return cwd, "", blocked
 
     script = (
         f"cd {shlex.quote(cwd)} 2>/dev/null && {stripped}\n"
         f"printf '{CWD_MARK}%s' \"$(pwd -P 2>/dev/null)\"\n"
     )
     try:
-        proc = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=10)
+        # HOME points at the game folder, so `cd`, `~` and `$HOME` land there
+        # instead of on the player's real home directory.
+        env = dict(os.environ, HOME=os.path.realpath(sandbox_root))
+        proc = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=10, env=env)
     except subprocess.TimeoutExpired:
         return cwd, "", "(that took too long and was stopped)"
 
@@ -1958,7 +2009,11 @@ def main(stdscr):
     stdscr.timeout(100)  # ms per tick
 
     draw_intro(stdscr, game)
-    stdscr.getch()
+    # getch() returns -1 every 100ms with no key (see stdscr.timeout above),
+    # so wait for a REAL keypress — otherwise the intro flashes for a tenth
+    # of a second and the player never gets to read the controls.
+    while stdscr.getch() == -1:
+        pass
 
     while True:
         h, w = stdscr.getmaxyx()
@@ -2219,9 +2274,27 @@ def selftest():
     shutil.rmtree(tmp + "_f", ignore_errors=True)
 
 
+def run():
+    """Start the game and handle the ways it can end. Returns the exit code."""
+    # curses waits ESCDELAY ms after an Esc to see if it starts an arrow-key
+    # sequence — the default is a full second, which makes Esc feel broken.
+    os.environ.setdefault("ESCDELAY", "25")
+    code = 0
+    try:
+        curses.wrapper(main)
+    except KeyboardInterrupt:
+        code = 130            # Ctrl+C is a perfectly normal way to leave
+    except curses.error as e:
+        print("TerminalQuest needs a real terminal window with curses support, at least "
+              f"{MIN_W}x{MIN_H}.\nRun it directly in Terminal (not piped or inside an editor).\n"
+              f"(details: {e})", file=sys.stderr)
+        return 1
+    print(cheat_sheet_text(LAST_GAME.learned if LAST_GAME else ()))
+    return code
+
+
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         selftest()
     else:
-        curses.wrapper(main)
-        print(cheat_sheet_text(LAST_GAME.learned if LAST_GAME else ()))
+        sys.exit(run())

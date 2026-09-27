@@ -370,7 +370,9 @@ class TestCheatSheet:
     def test_running_the_script_prints_the_sheet_after_the_game_closes(self, monkeypatch, capsys):
         monkeypatch.setattr(curses, "wrapper", lambda fn: None)
         monkeypatch.setattr(sys, "argv", ["terminalquest.py"])
-        runpy.run_path(os.path.join(ROOT, "terminalquest.py"), run_name="__main__")
+        with pytest.raises(SystemExit) as exc:
+            runpy.run_path(os.path.join(ROOT, "terminalquest.py"), run_name="__main__")
+        assert exc.value.code == 0
         assert "cheat sheet" in capsys.readouterr().out
 
     def test_running_the_script_with_selftest_still_works(self, monkeypatch, capsys):
@@ -534,3 +536,164 @@ class TestOlderGaps:
         monkeypatch.setattr(curses, "start_color", boom)
         monkeypatch.setattr(tq, "Game", lambda *a, **k: qgame)
         tq.main(ScriptedScreen([" ", "q", "y"]))
+
+
+class TestIntro:
+    def test_the_intro_waits_for_a_real_keypress_not_an_idle_tick(self, fake_curses, monkeypatch, qgame):
+        # Real bug found by playing the game in a real terminal: getch() gives -1
+        # every 100ms when nothing is pressed, and the intro treated that as
+        # "any key", flashing for a tenth of a second.  Here the "q" must be
+        # consumed as the start key, so the script runs out while main() is
+        # still looping, rather than quitting.
+        with pytest.raises(AssertionError, match="kept running"):
+            run_main(monkeypatch, qgame, [-1, -1, -1, "q", "y"])
+
+    def test_any_real_key_starts_the_game(self, fake_curses, monkeypatch, qgame):
+        run_main(monkeypatch, qgame, [-1, -1, "z", "q", "y"])
+
+
+# ---- real-terminal QA findings: safety guard, clean exits, Esc delay --------------------------------
+
+@pytest.fixture
+def box(tmp_path):
+    """A game-folder-shaped sandbox with a sibling 'outside' folder to protect."""
+    root = tmp_path / "game" / "stationX"
+    root.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "PRECIOUS.txt").write_text("keep me")
+    return str(root), str(outside)
+
+
+class TestPathGuard:
+    @pytest.mark.parametrize("line", [
+        "cat /etc/passwd", "ls /", "touch /tmp/tq_x", "rm /tmp/whatever", "cd /", "cd /tmp",
+        "ls ..", "touch ../sibling.txt", "cat ../../etc/hosts", "cp a.txt /tmp/a.txt",
+        "echo hi > /tmp/tq_out", "echo hi >/tmp/tq_out", "ls 2>/tmp/err", "FOO=/etc cat x",
+        "rm -rf /*", "ls /bin", "/bin/ls", "cat \"/etc/passwd\"", "cat '/etc/passwd'",
+    ])
+    def test_reaching_outside_the_folder_is_refused(self, box, line):
+        root, _ = box
+        cwd, out, err = tq.run_command(line, root, root)
+        assert err == tq.OUTSIDE_MSG or err == "nope. not even here.", (line, err)
+        assert cwd == root and out == ""
+
+    @pytest.mark.parametrize("line", [
+        "ls", "ls .", "ls ./sub", "cat a.txt", "touch new.txt", "mkdir -p deep/er", "echo hi > out.txt",
+        "cp a.txt b.txt", "mv a.txt c.txt", "rm a.txt", "ls -la", "ls 2>/dev/null", "echo 1/2",
+        "echo \"quoted words\"", "cd ~", "ls ~", "echo $HOME", "cat a.txt | grep a", "ls; pwd", "cd sub && ls",
+    ])
+    def test_ordinary_commands_are_untouched(self, box, line):
+        root, _ = box
+        os.makedirs(os.path.join(root, "sub"), exist_ok=True)
+        with open(os.path.join(root, "a.txt"), "w") as f:
+            f.write("a\n")
+        cwd, out, err = tq.run_command(line, root, root)
+        assert err != tq.OUTSIDE_MSG and "nope" not in err, (line, err)
+
+    def test_the_players_real_home_is_never_touched_by_rm_rf_tilde(self, box, tmp_path, monkeypatch):
+        root, outside = box
+        monkeypatch.setenv("HOME", outside)  # pretend this is the real home
+        for line in ("rm -rf ~", "rm -rf $HOME", "rm -rf ${HOME}", "rm -rf ~/*", "rm -r -f ~", "rm -fr ~"):
+            tq.run_command(line, root, root)
+            assert os.path.exists(os.path.join(outside, "PRECIOUS.txt")), line
+
+    def test_home_inside_the_game_is_the_game_folder(self, box, monkeypatch):
+        root, outside = box
+        monkeypatch.setenv("HOME", outside)
+        cwd, out, err = tq.run_command("echo $HOME", root, root)
+        assert out.strip() == os.path.realpath(root)
+
+    def test_bare_cd_goes_to_the_game_folder_not_the_real_home(self, box, monkeypatch):
+        root, outside = box
+        monkeypatch.setenv("HOME", outside)
+        os.makedirs(os.path.join(root, "sub"), exist_ok=True)
+        cwd, _, _ = tq.run_command("cd sub", root, root)
+        cwd2, _, _ = tq.run_command("cd", cwd, root)
+        assert cwd2 == os.path.realpath(root)
+
+    @pytest.mark.parametrize("line", ["rm -rf ~", "rm -rf .", "rm -r ..", "rm -rf $HOME", "rm -Rf ~", "rm --recursive ~"])
+    def test_recursive_rm_of_the_folder_itself_or_its_parents_is_refused(self, box, line):
+        root, _ = box
+        os.makedirs(os.path.join(root, "sub"), exist_ok=True)
+        cwd, out, err = tq.run_command(line, os.path.join(root, "sub"), root)
+        assert err != "" and os.path.isdir(root), (line, err)
+
+    def test_recursive_rm_of_a_subfolder_is_allowed(self, box):
+        root, _ = box
+        os.makedirs(os.path.join(root, "junkdir", "inner"))
+        cwd, out, err = tq.run_command("rm -rf junkdir", root, root)
+        assert err == "" and not os.path.exists(os.path.join(root, "junkdir"))
+
+    def test_a_symlink_that_points_outside_is_refused(self, box):
+        root, outside = box
+        os.symlink(outside, os.path.join(root, "portal"))
+        cwd, out, err = tq.run_command("cat portal/PRECIOUS.txt", root, root)
+        assert err == tq.OUTSIDE_MSG and out == ""
+        cwd, out, err = tq.run_command("touch portal/new.txt", root, root)
+        assert err == tq.OUTSIDE_MSG and not os.path.exists(os.path.join(outside, "new.txt"))
+
+    def test_unbalanced_quotes_are_left_for_bash_to_reject(self, box):
+        root, _ = box
+        cwd, out, err = tq.run_command("echo 'oops", root, root)
+        assert err != tq.OUTSIDE_MSG and err != ""
+
+    def test_the_dev_null_idiom_still_works(self, box):
+        root, _ = box
+        cwd, out, err = tq.run_command("ls nosuchfile 2>/dev/null", root, root)
+        assert err != tq.OUTSIDE_MSG
+
+    def test_writing_outside_leaves_no_file_behind(self, box):
+        root, outside = box
+        tq.run_command(f"touch {outside}/created.txt", root, root)
+        assert not os.path.exists(os.path.join(outside, "created.txt"))
+
+    def test_a_station_shows_the_friendly_outside_message(self, qgame):
+        enter(qgame, "A")
+        qgame.input_buf = "cat /etc/passwd"
+        qgame.terminal_submit()
+        assert tq.OUTSIDE_MSG in qgame.stations["A"].transcript[-1][1]
+
+    def test_quiz_answers_still_grade_with_the_guard_on(self):
+        for _, q in ((l, q) for l, pool in tq.QUIZ_POOLS.items() for q in pool if q["kind"] == "type"):
+            assert tq.grade_typed(q, q["answer"])[0]
+
+    @pytest.mark.parametrize("sid", tq.STATION_ORDER)
+    def test_every_stations_solution_is_unaffected_by_the_guard(self, qgame, sid):
+        solve(qgame, sid)
+        assert qgame.stations[sid].solved
+
+
+class TestCleanExits:
+    def test_ctrl_c_exits_quietly_with_130_and_the_cheat_sheet(self, monkeypatch, capsys):
+        def interrupted(fn):
+            raise KeyboardInterrupt
+        monkeypatch.setattr(curses, "wrapper", interrupted)
+        assert tq.run() == 130
+        out = capsys.readouterr()
+        assert "cheat sheet" in out.out and "Traceback" not in out.err
+
+    def test_a_normal_quit_returns_0(self, monkeypatch, capsys):
+        monkeypatch.setattr(curses, "wrapper", lambda fn: None)
+        assert tq.run() == 0
+        assert "cheat sheet" in capsys.readouterr().out
+
+    def test_no_terminal_gives_a_friendly_message_and_exit_code_1(self, monkeypatch, capsys):
+        def no_tty(fn):
+            raise curses.error("setupterm: could not find terminal")
+        monkeypatch.setattr(curses, "wrapper", no_tty)
+        assert tq.run() == 1
+        err = capsys.readouterr().err
+        assert "real terminal" in err and "112x28" in err and "could not find terminal" in err
+
+    def test_esc_no_longer_waits_a_full_second(self, monkeypatch):
+        monkeypatch.delenv("ESCDELAY", raising=False)
+        monkeypatch.setattr(curses, "wrapper", lambda fn: None)
+        tq.run()
+        assert int(os.environ["ESCDELAY"]) <= 50
+
+    def test_a_player_set_escdelay_is_respected(self, monkeypatch):
+        monkeypatch.setenv("ESCDELAY", "300")
+        monkeypatch.setattr(curses, "wrapper", lambda fn: None)
+        tq.run()
+        assert os.environ["ESCDELAY"] == "300"

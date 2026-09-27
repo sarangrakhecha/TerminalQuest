@@ -15,7 +15,7 @@ in the world reacts — a door unlocks, a gate opens, a locked room stops
 being locked. After each level there's an optional 3-question recap quiz to
 help it stick — take it or skip it.
 
-**8 commands · 8 stations · 3 levels · 331 automated tests · zero dependencies**
+**8 commands · 8 stations · 3 levels · 401 automated tests · zero dependencies**
 
 ## Contents
 
@@ -299,18 +299,28 @@ TERMINALQUEST_ROOT=/path/to/somewhere python3 terminalquest.py --reset
 ## Safety boundary
 
 TerminalQuest executes commands through your machine's real `/bin/bash`.
-Commands run inside a disposable scratch folder — the working directory is
-checked after every command and snapped back if anything would escape it —
-and a small blocklist rejects a handful of obviously destructive patterns
-(`sudo`, `rm -rf /`, fork bombs, `dd`, `mkfs`). **This is not an
-operating-system security sandbox.**
+Commands run inside a disposable scratch folder, and a few guards catch the
+accidents and jokes a curious learner might try:
+
+- the working directory is checked after every command and snapped back if
+  anything would escape it;
+- `HOME` is pointed at the game folder for every command, so `cd`, `~` and
+  `$HOME` land there and **`rm -rf ~` can't touch your real home directory**;
+- any path that resolves outside the game folder — absolute paths like
+  `/etc/passwd`, `..` climbs, `~`, symlinks — is refused with a friendly
+  message, and a recursive `rm` aimed at the folder itself (or above it) is
+  refused too;
+- a small blocklist rejects `sudo`, `rm -rf /`, fork bombs, `dd` and `mkfs`.
+
+**These are guardrails, not an operating-system security sandbox.** Command
+substitution, shell variables and scripts can still get around them.
 
 Do not:
 
 - run it with administrator or root privileges;
 - expose it as a public/shared shell;
 - point it at a machine with sensitive data while testing adversarial input; or
-- assume the pattern blocklist can catch every possible destructive command.
+- assume the guards can catch every possible destructive command.
 
 For adversarial testing, use a disposable VM or container.
 
@@ -321,7 +331,7 @@ terminalquest.py      game logic, the 8-station map, shell runner, and the curse
 tests/test_game.py    the pytest regression suite (game logic, rendering, stations)
 tests/test_quiz.py    the pytest suite for the optional recap quiz (96 tests)
 tests/test_ui.py      the curses-layer tests: colors, terminal panel, main() loop, selftest (28 tests)
-tests/test_features.py  learn mode, coaching tips, map cues, quit prompt, bell, cheat sheet, CI workflow, and gap-fillers for older code paths (93 tests)
+tests/test_features.py  learn mode, coaching tips, map cues, quit prompt, bell, cheat sheet, CI workflow, and gap-fillers for older code paths (163 tests)
 screenshots/          images rendered from the game's own drawing code
 README.md             this file
 ```
@@ -337,7 +347,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-331 tests, no real terminal required. What's actually covered:
+401 tests, no real terminal required. What's actually covered:
 
 | Area | What's tested |
 |---|---|
@@ -363,6 +373,18 @@ Every push and pull request runs the whole suite on **macOS and Linux** across
 **Python 3.9–3.12** via GitHub Actions (`.github/workflows/tests.yml`), with a
 **90% coverage floor** and the built-in self-test.
 
+### Real-terminal QA
+
+Beyond the unit tests, the release was played in an actual pseudo-terminal
+with a terminal emulator reading the screen: a complete run through all 8
+stations with real arrow-key escape sequences and typed commands, all three
+quiz flows, the coin rule, the win screen and `:wq`, quitting, Ctrl+C,
+resizing the window, the safety guards (with a throwaway `HOME`), and the
+command-line flags. That pass found and fixed: an intro screen that vanished
+after a tenth of a second, `rm -rf ~` slipping past the guard, Python
+tracebacks on Ctrl+C or with no terminal, and Esc taking a full second to
+register.
+
 ### Quality approach
 
 How the suite is designed, and what was run before this release:
@@ -381,12 +403,12 @@ How the suite is designed, and what was run before this release:
   rather than hardcoded step counts, so moving a door doesn't break them.
 - **Deterministic and fast.** No real terminal, network, or timing
   dependence; the full suite runs in about a second.
-- **Release check.** Before the latest release: `pytest` → 331 passed,
+- **Release check.** Before the latest release: `pytest` → 401 passed,
   `python3 terminalquest.py --reset --selftest` → `SELFTEST PASSED`, run from a
   clean checkout with no stale `__pycache__`.
 
 - **Measured coverage.** `pytest --cov=terminalquest --cov-branch` reports
-  **98%** (1313 statements, 510 branches, 331 tests). The live curses `main()`
+  **98%** (1357 statements, 528 branches, 401 tests). The live curses `main()`
   loop is exercised by a scripted fake screen that feeds it real keypresses, so
   input handling is covered too. What's left is small: a few defensive
   branches, the subprocess-timeout path and the `__main__` entry point. Note
