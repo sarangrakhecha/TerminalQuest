@@ -66,12 +66,10 @@ Every terminal shows exactly what you need and nothing more:
 3. **SYNTAX** — including argument roles like `SOURCE`, `DESTINATION`, `FILE`.
 4. **YOUR TASK** — the concrete, observable thing you need to produce.
 
-Type it yourself, or press `Tab` to load the exact command into the prompt
-without running it — that's a hint, not autopilot, since you still have to
-press `Enter` yourself. After running something, `?` explains the result
-once, on request — it never becomes a mandatory screen you have to click
-past, and it correctly recognizes a *failed* command as a failure instead of
-explaining it as if it had worked.
+You have to type it yourself — there's no autofill. After running
+something, `?` explains the result once, on request — it never becomes a
+mandatory screen you have to click past, and it correctly recognizes a
+*failed* command as a failure instead of explaining it as if it had worked.
 
 ### The optional recap quiz
 
@@ -239,7 +237,6 @@ TERMINALQUEST_ROOT=/path/to/somewhere python3 terminalquest.py --reset
 | Overworld | `b` | Turn the solve bell on/off |
 | Overworld | `t` | Toggle high-contrast mode (bold/reverse/underline, no color) |
 | At a terminal | *(typing)* | A real bash prompt — nothing is simulated |
-| At a terminal | `Tab` | Load the shown command into the prompt, without running it |
 | At a terminal | `Enter` | Run the line |
 | At a terminal | `?` | Explain the last result (once something's been run) |
 | At a terminal | `Esc` | Clear the line, or leave if it's already empty |
@@ -285,8 +282,8 @@ TERMINALQUEST_ROOT=/path/to/somewhere python3 terminalquest.py --reset
   filesystem after your command runs — a real file or folder has to exist,
   get renamed, or disappear. Nothing is pattern-matched against expected
   keystrokes.
-- **Guidance without autopilot.** `Tab` inserts the answer; it never
-  submits it for you.
+- **Guidance without autopilot.** The panel shows the exact command; you
+  still have to type it yourself. Nothing autofills it for you.
 - **Explanation at the right moment.** `?` is available *after* you've
   done something, not forced on you before you're allowed to continue.
 - **Progress without pressure.** No timers, no speed bonuses, no combo
@@ -357,7 +354,7 @@ pytest
 | Enemies | Patrol movement, collision costing a life, game over at 0 lives |
 | Stations | All 8 stations, each solved by exactly one real command; wrong commands never solve anything, and a right command aimed at the wrong target (`mkdir mystuff` instead of `mkdir stash`) gets a nudge instead of a silent fail (including the ones solved by a file's *absence*, which is its own edge case); every launch starts a fresh campaign, so leftover files can't mark a station solved behind the game's back |
 | Level gates | Both coin-gated levels require *both* conditions (last station solved **and** every coin collected) in either order; the gate that has no coin requirement; the `":wq"`-quit combo's matching logic |
-| The lesson panel | COMMAND/WHAT IT DOES/SYNTAX/YOUR TASK content, `Tab`-to-insert, `?`-to-explain (including that a *failed* command is recognized as an error and never explained as if it had succeeded) |
+| The lesson panel | COMMAND/WHAT IT DOES/SYNTAX/YOUR TASK content, `?`-to-explain (including that a *failed* command is recognized as an error and never explained as if it had succeeded) |
 | Full playthrough | Every station in order, end to end, to the exit |
 | Rendering | A `FakeScreen` stand-in renders `draw_base` and friends to plain text at an exact terminal size (including deliberately too-small ones), so a locked tile showing through, or a crash on a shrunk window, gets caught without a real terminal; covers the per-level fog/masking, the congrats screen, and the win banner |
 | Recap quiz | Every question's own stated answer passes the real-bash grader, and no do-nothing command (`true`, `pwd`, `echo hi`) passes any typed question; choice questions have exactly one valid answer; 3 distinct questions drawn from the right level's pool, reproducible with a seed; skip / hint-then-retry / reveal-after-two-misses flow; never costs lives or score; key handling and every quiz screen at several window sizes |
@@ -408,7 +405,7 @@ How the suite is designed, and what was run before this release:
   clean checkout with no stale `__pycache__`.
 
 - **Measured coverage.** `pytest --cov=terminalquest --cov-branch` reports
-  **98%** (1380 statements, 538 branches, 407 tests). The live curses `main()`
+  **98%** (1373 statements, 534 branches, 407 tests). The live curses `main()`
   loop is exercised by a scripted fake screen that feeds it real keypresses, so
   input handling is covered too. What's left is small: a few defensive
   branches, the subprocess-timeout path and the `__main__` entry point. Note
@@ -422,8 +419,8 @@ itself, useful for a quick sanity check without installing anything:
 python3 terminalquest.py --selftest
 ```
 
-It drives a full playthrough of all 8 stations, the `Tab`/`?` terminal
-affordances, the coin gates, and the win condition, headless.
+It drives a full playthrough of all 8 stations, the `?` terminal
+affordance, the coin gates, and the win condition, headless.
 
 ## Design rules (read this before opening a PR)
 
@@ -439,9 +436,9 @@ This project is deliberately small, and stays that way on purpose:
   out what to type.
 - **The reference panel stays on screen.** Every terminal always shows
   COMMAND / WHAT IT DOES / SYNTAX / YOUR TASK — not a one-time card that
-  disappears after your first visit. `Tab` loads the exact command into the
-  prompt (without running it) if you'd rather have it typed for you; `?`
-  explains the last result once something's actually run.
+  disappears after your first visit. There's no autofill: you type the
+  command yourself; `?` explains the last result once something's actually
+  run.
 - **No dependencies.** Python 3 standard library only (`curses` is built
   in). If your change needs a `pip install` to *play* the game, it's
   probably out of scope (the dev-only test suite is the one exception).

@@ -485,8 +485,9 @@ class TestHatchGate:
 class TestLessonPanel:
     """The COMMAND/WHAT IT DOES/SYNTAX/YOUR TASK panel is always visible at
     a station's terminal — there's no one-time card and no gate to dismiss.
-    Tab loads the shown command without solving the station; '?' toggles an
-    explanation of the last result, only once something has actually run."""
+    '?' toggles an explanation of the last result, only once something has
+    actually run. There is deliberately no way to have the command typed
+    in for you — the panel shows it, you still have to type it."""
 
     def test_panel_content_is_available_immediately_on_first_visit(self, game):
         pos = next(pos for pos, sid in tq.COMPUTERS.items() if sid == "A")
@@ -496,19 +497,21 @@ class TestLessonPanel:
         assert tq.YOUR_TASK["A"]
         assert tq.command_does("A")
 
-    def test_tab_loads_the_command_without_solving(self, game):
+    def test_tab_autofill_has_been_removed(self, game):
+        # Real regression: Tab used to autofill the exact solving command
+        # into the prompt — a hidden auto-solve hint, not a real hint.
+        # There's no longer any code path that can do that.
         enter(game, "A")
+        assert not hasattr(game, "terminal_suggest")
+        tq.handle_terminal_key(game, 9)  # Tab, routed the same way real keys are
         assert game.input_buf == ""
-        game.terminal_suggest()
-        assert game.input_buf == game.stations["A"].hint == "ls"
         assert not game.stations["A"].solved
 
-    def test_tab_does_nothing_once_solved(self, game):
-        solve(game, "A")
-        game.enter_terminal("A")
-        game.input_buf = ""
-        game.terminal_suggest()
-        assert game.input_buf == ""
+    def test_terminal_footer_no_longer_mentions_tab(self, game):
+        enter(game, "A")
+        screen = FakeScreen()
+        tq.draw_terminal(screen, game)
+        assert "Tab" not in screen.dump()
 
     def test_explanation_toggle_requires_a_prior_attempt(self, game):
         enter(game, "A")

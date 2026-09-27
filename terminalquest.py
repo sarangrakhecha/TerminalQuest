@@ -1150,15 +1150,6 @@ class Game:
         st = self.stations[station_id]
         self.return_timer = 15 if st.solved else 0
 
-    def terminal_suggest(self):
-        """Tab: load the station's exact command into the prompt WITHOUT
-        running it — the command is already shown in the panel above, so
-        this is a discoverability aid the player can still edit, not an
-        auto-solve."""
-        st = self.stations[self.active_station]
-        if not st.solved:
-            self.input_buf = st.hint
-
     def toggle_explanation(self):
         st = self.stations[self.active_station]
         if st.transcript:
@@ -1769,7 +1760,7 @@ def draw_terminal(stdscr, game):
     put(top + box_h - 2, left + 3, f"$ {game.input_buf}", curses.A_BOLD)
     try:
         stdscr.addstr(top + box_h + 1, left,
-                      "Tab: insert command   Enter: run   ?: explain last result   Esc: clear / leave"[: box_w],
+                      "Enter: run   ?: explain last result   Esc: clear / leave"[: box_w],
                       curses.A_DIM)
     except curses.error:
         pass
@@ -1993,6 +1984,26 @@ def wait_for_quit(stdscr, game=None):
         buf, armed = feed_quit_combo(buf, ch, "win")
 
 
+def handle_terminal_key(game, ch):
+    """Route one keypress while at a station's terminal. Pulled out of
+    main() so it can be tested without curses — mirrors handle_quiz_key.
+    There is deliberately no key that fills the prompt in for you: Tab
+    used to (game.terminal_suggest(), removed), and any other key outside
+    the cases below is just as deliberately a no-op, not a fallthrough."""
+    if game.stations[game.active_station].solved:
+        game.exit_terminal()   # solved — any key at all takes you back to the map
+    elif ch == 27:
+        game.terminal_escape()
+    elif ch in (curses.KEY_ENTER, 10, 13):
+        game.terminal_submit()
+    elif ch == ord("?") and not game.input_buf:
+        game.toggle_explanation()
+    elif ch in (curses.KEY_BACKSPACE, 127, 8):
+        game.terminal_backspace()
+    elif 32 <= ch <= 126:
+        game.terminal_char(chr(ch))
+
+
 def handle_quiz_key(game, ch):
     """Route one keypress on any of the quiz screens (offer / question /
     summary). Pulled out of main() so it can be tested without curses."""
@@ -2130,20 +2141,7 @@ def main(stdscr):
                 game.dismiss_congrats()
 
         elif game.mode == "terminal":
-            if game.stations[game.active_station].solved:
-                game.exit_terminal()   # solved — any key at all takes you back to the map
-            elif ch == 27:
-                game.terminal_escape()
-            elif ch in (curses.KEY_ENTER, 10, 13):
-                game.terminal_submit()
-            elif ch == 9:  # Tab: load the shown command into the prompt, don't run it
-                game.terminal_suggest()
-            elif ch == ord("?") and not game.input_buf:
-                game.toggle_explanation()
-            elif ch in (curses.KEY_BACKSPACE, 127, 8):
-                game.terminal_backspace()
-            elif 32 <= ch <= 126:
-                game.terminal_char(chr(ch))
+            handle_terminal_key(game, ch)
 
         elif game.mode in ("quizoffer", "quiz", "quizdone"):
             handle_quiz_key(game, ch)
@@ -2197,11 +2195,6 @@ def selftest():
         assert g.show_explanation is True
         g.toggle_explanation()
         assert g.show_explanation is False
-
-        # Tab loads the exact solving command without submitting it
-        g.terminal_suggest()
-        assert g.input_buf == g.stations[sid].hint
-        assert not g.stations[sid].solved
 
         g.input_buf = solve_commands[sid]
         g.terminal_submit()
