@@ -452,22 +452,10 @@ project. This one stays small.
 ## Contributing
 
 Issues and PRs welcome — this is exactly the kind of project meant to be
-poked at, broken, and improved. A few things that'll make a PR easy to
-merge:
-
-1. Read the [design rules](#design-rules-read-this-before-opening-a-pr) above
-   first — most rejected PRs will be rejected for growing the scope, not
-   for code quality.
-2. Add or update a test in `tests/` for any behavior change (`test_game.py` for game logic, `test_quiz.py` for the quiz, `test_ui.py` / `test_features.py` for the screen and newer features).
-3. Run `pytest` and `python3 terminalquest.py --selftest` before opening
-   the PR — both should pass clean.
-4. Keep it small. A 20-line diff that fixes one thing beats a 200-line
-   diff that also refactors three unrelated things.
-
-Ideas that fit the spirit of this project and would be genuinely welcome:
-more rooms/enemies/secrets in the existing map, sound-free visual polish.
-Ideas that don't fit: new commands, scoring/achievement systems, external
-dependencies, or growing past three small levels.
+poked at, broken, and improved. `main` is protected — every change lands
+through a pull request and a review, nothing gets pushed straight to it.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the fork → branch → PR workflow,
+what to test before opening a PR, and what is/isn't in scope.
 
 ## Reporting a bug
 
