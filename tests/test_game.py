@@ -758,6 +758,18 @@ class TestFoggedBandRendering:
         assert "#" in dump
         assert ":wq" in dump
 
+    def test_win_screen_echoes_what_has_been_typed(self, game):
+        screen = FakeScreen()
+        tq.draw_win(screen, game, typed=":w")
+        assert "> :w" in screen.dump()
+
+    def test_win_screen_shows_an_error_when_given_one(self, game):
+        screen = FakeScreen()
+        tq.draw_win(screen, game, typed="wq", error='not a command: "wq" — type :wq')
+        dump = screen.dump()
+        assert "not a command" in dump
+        assert ":wq" in dump
+
 
 # ==========================================================================
 # the ":wq" quit-from-anywhere easter egg
@@ -844,6 +856,54 @@ class TestQuitCombo:
     def test_keypad_enter_also_confirms(self):
         import curses
         assert self._run_wait_for_quit([ord(":"), ord("w"), ord("q"), curses.KEY_ENTER])
+
+    @staticmethod
+    def _run_wait_for_quit_with_screen(keys, game):
+        """Like _run_wait_for_quit, but with a real (fake) screen so the
+        drawing wait_for_quit does each loop can be inspected."""
+        stream = iter(keys)
+
+        class Scr(FakeScreen):
+            def getch(self):
+                try:
+                    return next(stream)
+                except StopIteration:
+                    raise RuntimeError("out of keys")
+
+        scr = Scr()
+        try:
+            tq.wait_for_quit(scr, game)
+            return scr, True
+        except RuntimeError:
+            return scr, False
+
+    def test_wrong_text_then_enter_does_not_quit_and_is_not_silent(self, game):
+        # Real bug: typing anything other than exactly ":wq" and pressing
+        # Enter used to vanish with zero feedback — the game just sat there.
+        keys = [ord("w"), ord("q"), 10, -1]
+        scr, finished = self._run_wait_for_quit_with_screen(keys, game)
+        assert not finished  # did not quit
+        dump = scr.dump()
+        assert "not a command" in dump
+        assert "wq" in dump
+
+    def test_after_a_wrong_attempt_the_line_is_cleared_for_a_retry(self, game):
+        keys = [ord("x"), 10, ord(":"), ord("w"), ord("q"), 10]
+        scr, finished = self._run_wait_for_quit_with_screen(keys, game)
+        assert finished  # the retry with the correct combo does quit
+
+    def test_backspace_edits_the_typed_line(self, game):
+        keys = [ord("w"), ord("z"), curses.KEY_BACKSPACE, ord("q"), 10, -1]
+        scr, finished = self._run_wait_for_quit_with_screen(keys, game)
+        assert not finished
+        assert "not a command: \"wq\"" in scr.dump()
+
+    def test_enter_with_an_empty_line_shows_a_plain_prompt_not_a_quoted_one(self, game):
+        keys = [10, -1]
+        scr, finished = self._run_wait_for_quit_with_screen(keys, game)
+        assert not finished
+        assert "type :wq" in scr.dump()
+        assert '""' not in scr.dump()
 
     def test_a_special_key_like_an_arrow_resets_the_buffer(self):
         buf, _ = tq.feed_quit_combo("", ord(":"), "overworld")

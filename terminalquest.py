@@ -1845,7 +1845,7 @@ def render_banner(word):
     return [r.rstrip() for r in rows]
 
 
-def draw_win(stdscr, game):
+def draw_win(stdscr, game, typed="", error=None):
     stdscr.erase()
     h, w = stdscr.getmaxyx()
     banner_lines = render_banner("YOU WIN")
@@ -1884,6 +1884,20 @@ def draw_win(stdscr, game):
                       curses.A_BOLD | curses.A_REVERSE)
     except curses.error:
         pass
+    row += 2
+    # echo what's actually been typed so far — without this, a player
+    # mistyping ":wq" got no feedback at all, just a screen that silently
+    # ate their keystrokes.
+    typed_line = "> " + typed
+    try:
+        stdscr.addstr(row, max(0, (w - len(typed_line)) // 2), typed_line, curses.A_BOLD)
+    except curses.error:
+        pass
+    if error:
+        try:
+            stdscr.addstr(row + 1, max(0, (w - len(error)) // 2), error, CP_ERR | curses.A_BOLD)
+        except curses.error:
+            pass
     stdscr.refresh()
 
 
@@ -1951,16 +1965,31 @@ def cheat_sheet_text(learned=()):
     return "\n".join(lines)
 
 
-def wait_for_quit(stdscr):
+def wait_for_quit(stdscr, game=None):
     """Block on the win screen until the player types ":wq" and then Enter,
-    like vim. Idle ticks (getch() == -1) between keystrokes are ignored."""
+    like vim. Idle ticks (getch() == -1) between keystrokes are ignored.
+    Wrong text followed by Enter no longer vanishes silently — it's echoed
+    back with an error, and the line resets so they can try again."""
     buf, armed = "", False
+    typed, error = "", None
     while True:
+        if game is not None:
+            draw_win(stdscr, game, typed=typed, error=error)
         ch = stdscr.getch()
         if ch == -1:
             continue
-        if armed and ch in (curses.KEY_ENTER, 10, 13):
-            return
+        if ch in (curses.KEY_ENTER, 10, 13):
+            if armed:
+                return
+            error = f'not a command: "{typed}" — type :wq' if typed else "type :wq"
+            buf, armed, typed = "", False, ""
+            continue
+        if ch in (curses.KEY_BACKSPACE, 127, 8):
+            typed = typed[:-1]
+            error = None
+        elif 0 <= ch < 256 and 32 <= ch <= 126:
+            typed = (typed + chr(ch))[-40:]
+            error = None
         buf, armed = feed_quit_combo(buf, ch, "win")
 
 
@@ -2054,12 +2083,12 @@ def main(stdscr):
         elif game.mode == "gameover":
             draw_gameover(stdscr, game)
         elif game.mode == "win":
-            draw_win(stdscr, game)
             # ":wq" then Enter — and only that — closes the game out here,
             # once it's actually over. Not "any key": a held-over arrow key
             # from walking onto the exit tile would otherwise close this
-            # instantly, before the banner is even seen.
-            wait_for_quit(stdscr)
+            # instantly, before the banner is even seen. wait_for_quit does
+            # its own drawing so it can echo what's typed and flag mistakes.
+            wait_for_quit(stdscr, game)
             return
 
         ch = stdscr.getch()

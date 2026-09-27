@@ -15,7 +15,7 @@ in the world reacts — a door unlocks, a gate opens, a locked room stops
 being locked. After each level there's an optional 3-question recap quiz to
 help it stick — take it or skip it.
 
-**8 commands · 8 stations · 3 levels · 401 automated tests · zero dependencies**
+**8 commands · 8 stations · 3 levels · 407 automated tests · zero dependencies**
 
 ## Contents
 
@@ -347,7 +347,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-401 tests, no real terminal required. What's actually covered:
+407 tests, no real terminal required. What's actually covered:
 
 | Area | What's tested |
 |---|---|
@@ -403,12 +403,12 @@ How the suite is designed, and what was run before this release:
   rather than hardcoded step counts, so moving a door doesn't break them.
 - **Deterministic and fast.** No real terminal, network, or timing
   dependence; the full suite runs in about a second.
-- **Release check.** Before the latest release: `pytest` → 401 passed,
+- **Release check.** Before the latest release: `pytest` → 407 passed,
   `python3 terminalquest.py --reset --selftest` → `SELFTEST PASSED`, run from a
   clean checkout with no stale `__pycache__`.
 
 - **Measured coverage.** `pytest --cov=terminalquest --cov-branch` reports
-  **98%** (1357 statements, 528 branches, 401 tests). The live curses `main()`
+  **98%** (1380 statements, 538 branches, 407 tests). The live curses `main()`
   loop is exercised by a scripted fake screen that feeds it real keypresses, so
   input handling is covered too. What's left is small: a few defensive
   branches, the subprocess-timeout path and the `__main__` entry point. Note
