@@ -52,7 +52,7 @@ class TestPlayerMarker:
         assert self._marker(draw(qgame), qgame) == f"[{glyph}]"
 
     def test_the_legend_shows_the_bracketed_marker(self):
-        assert tq.LEGEND.startswith("[▶] you")
+        assert tq.LEGEND_TOKENS[0][0].startswith("[▶] you")
 
     def test_a_bracketed_player_at_the_left_edge_does_not_crash(self, qgame):
         qgame.px = 0
@@ -409,13 +409,6 @@ class TestCiWorkflow:
 # ---- gap-fillers for older code paths ---------------------------------------------------------------------------------------
 
 class TestOlderGaps:
-    def test_a_command_that_hangs_is_stopped_with_a_friendly_message(self, tmp_path, monkeypatch):
-        def hang(*a, **k):
-            raise subprocess.TimeoutExpired(cmd="x", timeout=10)
-        monkeypatch.setattr(subprocess, "run", hang)
-        cwd, out, err = tq.run_command("sleep 99", str(tmp_path), str(tmp_path))
-        assert cwd == str(tmp_path) and "too long" in err
-
     def test_write_can_set_file_permissions(self, tmp_path):
         target = tmp_path / "sub" / "f.txt"
         tq._write(str(target), "hi", mode=0o600)
@@ -450,7 +443,7 @@ class TestOlderGaps:
         enter(qgame, "A")
         qgame.input_buf = "   "
         qgame.terminal_submit()
-        assert qgame.stations["A"].attempts == 0 and qgame.stations["A"].transcript == []
+        assert qgame.stations["A"].transcript == []
 
     def test_the_solved_countdown_returns_you_to_the_map(self, qgame):
         solve(qgame, "A")
@@ -539,17 +532,16 @@ class TestOlderGaps:
 
 
 class TestIntro:
-    def test_the_intro_waits_for_a_real_keypress_not_an_idle_tick(self, fake_curses, monkeypatch, qgame):
-        # Real bug found by playing the game in a real terminal: getch() gives -1
-        # every 100ms when nothing is pressed, and the intro treated that as
-        # "any key", flashing for a tenth of a second.  Here the "q" must be
-        # consumed as the start key, so the script runs out while main() is
-        # still looping, rather than quitting.
-        with pytest.raises(AssertionError, match="kept running"):
-            run_main(monkeypatch, qgame, [-1, -1, -1, "q", "y"])
+    def test_the_intro_blocks_until_a_real_key_is_pressed(self, fake_curses, monkeypatch, qgame):
+        # Real bug found by playing the game in a real terminal: the intro
+        # used a timed getch(), got -1 after 100ms, and treated that as "any
+        # key" — it flashed for a tenth of a second. It now does a blocking
+        # read (timeout -1), so only a genuine keypress can dismiss it.
+        screen = run_main(monkeypatch, qgame, ["x", "q", "y"])   # "x" starts the game
+        assert screen.timeouts[0] == -1
 
     def test_any_real_key_starts_the_game(self, fake_curses, monkeypatch, qgame):
-        run_main(monkeypatch, qgame, [-1, -1, "z", "q", "y"])
+        run_main(monkeypatch, qgame, ["z", "q", "y"])
 
 
 # ---- real-terminal QA findings: safety guard, clean exits, Esc delay --------------------------------

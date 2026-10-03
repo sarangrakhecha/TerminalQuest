@@ -33,12 +33,15 @@ import difflib
 import os
 import random
 import re
+import resource
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 from collections import deque
 
 DEFAULT_ROOT = os.path.expanduser("~/TerminalQuest_Arcade")
@@ -104,11 +107,34 @@ def _reaches_outside(line, cwd, sandbox_root):
     return None
 
 
+COMMAND_TIMEOUT = 10          # seconds before a command is stopped
+OUTPUT_SHOWN = 64 * 1024      # characters of output kept for the transcript
+OUTPUT_CAP = 1024 * 1024      # bytes any one command may write (output or files)
+
+
+def _cap_file_size():
+    """Runs in the child before exec: a command that writes without end (`yes`,
+    `cat /dev/zero > f`) is stopped by the OS at OUTPUT_CAP instead of eating
+    the player's memory or disk."""
+    resource.setrlimit(resource.RLIMIT_FSIZE, (OUTPUT_CAP, OUTPUT_CAP))
+
+
+def _read_text(f):
+    f.seek(0)
+    return f.read().decode("utf-8", errors="replace")
+
+
 def run_command(line, cwd, sandbox_root):
     """Execute `line` as real bash, starting in `cwd`. The tracked working
     directory is snapped back if it would leave sandbox_root — this is NOT an
     OS-level sandbox; bash itself can still touch any path it has access to.
-    Returns (new_cwd, out, err)."""
+    Returns (new_cwd, out, err).
+
+    The command gets no keyboard (stdin is /dev/null, so a bare `cat` or
+    `read` ends at once instead of swallowing the player's keystrokes), its
+    output goes to temp files capped at OUTPUT_CAP, undecodable bytes become
+    replacement characters, and when it finishes or times out its whole
+    process group is killed, so a `sleep 99 &` can't linger or hold the game up."""
     stripped = line.strip()
     if not stripped:
         return cwd, "", ""
@@ -122,15 +148,28 @@ def run_command(line, cwd, sandbox_root):
         f"cd {shlex.quote(cwd)} 2>/dev/null && {stripped}\n"
         f"printf '{CWD_MARK}%s' \"$(pwd -P 2>/dev/null)\"\n"
     )
-    try:
-        # HOME points at the game folder, so `cd`, `~` and `$HOME` land there
-        # instead of on the player's real home directory.
-        env = dict(os.environ, HOME=os.path.realpath(sandbox_root))
-        proc = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, timeout=10, env=env)
-    except subprocess.TimeoutExpired:
+    # HOME points at the game folder, so `cd`, `~` and `$HOME` land there
+    # instead of on the player's real home directory.
+    env = dict(os.environ, HOME=os.path.realpath(sandbox_root))
+    with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
+        proc = subprocess.Popen(["/bin/bash", "-c", script], stdin=subprocess.DEVNULL,
+                                stdout=out_f, stderr=err_f, env=env,
+                                start_new_session=True, preexec_fn=_cap_file_size)
+        try:
+            proc.wait(timeout=COMMAND_TIMEOUT)
+            timed_out = False
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        finally:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)   # also reaps anything it left running
+            except (ProcessLookupError, PermissionError):
+                pass
+            proc.wait()
+        out, err = _read_text(out_f), _read_text(err_f)
+    if timed_out:
         return cwd, "", "(that took too long and was stopped)"
 
-    out, err = proc.stdout, proc.stderr
     new_cwd = cwd
     if CWD_MARK in out:
         idx = out.rfind(CWD_MARK)
@@ -141,7 +180,13 @@ def run_command(line, cwd, sandbox_root):
     real_new = os.path.realpath(new_cwd)
     if not (real_new == real_root or real_new.startswith(real_root + os.sep)):
         new_cwd = cwd
-    return new_cwd, out, err
+    return new_cwd, _shorten(out), _shorten(err)
+
+
+def _shorten(text):
+    if len(text) <= OUTPUT_SHOWN:
+        return text
+    return text[:OUTPUT_SHOWN] + "\n(output cut off)"
 
 
 def first_word(line):
@@ -164,28 +209,22 @@ def _write(path, content, mode=None):
 # ==========================================================================
 
 class Station:
-    def __init__(self, id, name, root, clue, lesson, hint, explain=None):
+    def __init__(self, id, name, root, clue, hint, explain=None):
         self.id = id
         self.name = name
         self.root = root          # absolute path, this station's own sandbox
         self.cwd = root
         self.clue = clue          # short flavor line, shown as the box header — no command names
-        self.lesson = lesson      # kept for reference; the panel below builds its COMMAND /
-                                   # WHAT IT DOES / SYNTAX / YOUR TASK sections from hint/explain
-                                   # and the module-level COMMAND_SYNTAX/YOUR_TASK tables instead
         self.hint = hint          # the exact command that solves this station
         self.explain = explain    # (command_word, plain-English sentence) shown again after solving
         self.transcript = []      # list of (prompt_line, output_text)
-        self.attempts = 0
         self.solved = False
-        self.hint_shown = False
         self.fails = 0            # submissions that didn't solve this station
         self.tip = ""             # one-line coaching after repeated misses
         self.last_command = ""
-        self.resolved_explain = ""
+        self.resolved_explain = ""   # the "that was cat — ..." line, filled in when solved
 
     def run(self, line):
-        self.attempts += 1
         prompt = f"{os.path.relpath(self.cwd, self.root) or '.'} $ {line}"
         self.cwd, out, err = run_command(line, self.cwd, self.root)
         text = (out + ("\n" + err if err.strip() else "")).rstrip("\n")
@@ -296,45 +335,36 @@ def near_miss_hint(sid, st):
 STATION_META = {
     "A": dict(
         name="??", clue="This thing hums.",
-        lesson="new command: ls\nlists what's in your current folder.\n\ntype:  ls\nthen press Enter.",
         hint="ls", explain=("ls", "that was ls — it lists what's in the current folder."),
         setup=lambda root: _write(os.path.join(root, "key.txt"), "found it.\n"),
         check=_check_ls,
     ),
     "B": dict(
         name="??", clue="Paper doesn't read itself.",
-        lesson="new command: cat\nprints a file's contents to the screen.\n"
-               "there's a file here called key.txt.\n\ntype:  cat key.txt\nthen press Enter.",
         hint="cat key.txt", explain=("cat", "that was cat — it prints a file's contents to the screen."),
         setup=lambda root: _write(os.path.join(root, "key.txt"), "the door hums once you read this.\n"),
         check=_check_cat,
     ),
     "C": dict(
         name="??", clue="Something is sealed behind a folder marked vault.",
-        lesson="new command: cd\nmoves you into a folder.\n"
-               "there's a folder here called vault.\n\ntype:  cd vault\nthen press Enter.",
         hint="cd vault", explain=("cd", "that was cd — it moves you into a folder."),
         setup=lambda root: _write(os.path.join(root, "vault", "prize.txt"), "you made it in.\n"),
         check=_check_cd,
     ),
     "D": dict(
         name="??", clue="This room has nowhere to put anything.",
-        lesson="new command: mkdir\ncreates a new folder.\n\ntype:  mkdir stash\nthen press Enter.",
         hint="mkdir stash", explain=("mkdir", "that was mkdir — it creates a new folder."),
         setup=lambda root: None,
         check=_check_mkdir,
     ),
     "E": dict(
         name="??", clue="Nothing here yet. Maybe that's the point.",
-        lesson="new command: touch\ncreates a new, empty file.\n\ntype:  touch spare.key\nthen press Enter.",
         hint="touch spare.key", explain=("touch", "that was touch — it creates a new, empty file."),
         setup=lambda root: None,
         check=_check_touch,
     ),
     "F": dict(
         name="??", clue="There's a template here. Somewhere else needs one too.",
-        lesson="new command: cp\ncopies a file, without deleting the original.\n"
-               "there's a file here called template.txt.\n\ntype:  cp template.txt backup.txt\nthen press Enter.",
         hint="cp template.txt backup.txt",
         explain=("cp", "that was cp — it copies a file without deleting the original."),
         setup=lambda root: _write(os.path.join(root, "template.txt"), "daily report template\n"),
@@ -342,16 +372,12 @@ STATION_META = {
     ),
     "G": dict(
         name="??", clue="Something here is still called 'draft'.",
-        lesson="new command: mv\nmoves or renames a file.\n"
-               "there's a file here called draft.txt.\n\ntype:  mv draft.txt final.txt\nthen press Enter.",
         hint="mv draft.txt final.txt", explain=("mv", "that was mv — it moves or renames a file."),
         setup=lambda root: _write(os.path.join(root, "draft.txt"), "rename me\n"),
         check=_check_mv,
     ),
     "H": dict(
         name="??", clue="Something small is jamming the gate.",
-        lesson="new command: rm\ndeletes a file — no undo, so it's worth respecting.\n"
-               "there's a file here called jam.lock.\n\ntype:  rm jam.lock\nthen press Enter.",
         hint="rm jam.lock", explain=("rm", "that was rm — it deletes a file. no undo, so it's worth respecting."),
         setup=lambda root: _write(os.path.join(root, "jam.lock"), "(holding the gate signal open)\n"),
         check=_check_rm,
@@ -430,7 +456,7 @@ def build_stations(game_root):
             if meta["setup"]:
                 meta["setup"](root)
             open(marker, "w").close()
-        st = Station(sid, meta["name"], root, meta["clue"], meta["lesson"], meta["hint"], meta["explain"])
+        st = Station(sid, meta["name"], root, meta["clue"], meta["hint"], meta["explain"])
         stations[sid] = st
         checkers[sid] = meta["check"]
     return {sid: (stations[sid], checkers[sid]) for sid in STATION_ORDER}
@@ -863,6 +889,9 @@ def grade_typed(question, line):
 # Game state — pure logic, no curses. Testable on its own.
 # ==========================================================================
 
+MAX_LIVES = 3
+
+
 class Game:
     def __init__(self, root, reset=False, quiz=True, rng=None, enemies=True):
         self.root = root
@@ -880,11 +909,11 @@ class Game:
 
         self.grid = build_grid()
         self.doors = {k: dict(v, locked=True) for k, v in DOORS.items()}
+        self._door_by_pos = {d["pos"]: d for d in self.doors.values()}
         self.computers = dict(COMPUTERS)
         self.signs = dict(SIGNS)
         self.enemies = [dict(e) for e in ENEMIES_INIT]
         self.coins = {pos: True for pos in COINS_INIT}
-        self.hidden_revealed = False
 
         stations = build_stations(root)
         self.stations = {k: v[0] for k, v in stations.items()}
@@ -892,7 +921,7 @@ class Game:
 
         self.px, self.py = PLAYER_START
         self.facing = "right"
-        self.lives = 3
+        self.lives = MAX_LIVES
         self.score = 0
         self.invuln = 0
         self.tick_count = 0
@@ -918,10 +947,7 @@ class Game:
         return self.grid[y][x] == "#"
 
     def door_at(self, x, y):
-        for d in self.doors.values():
-            if d["pos"] == (x, y):
-                return d
-        return None
+        return self._door_by_pos.get((x, y))
 
     def enemy_at(self, x, y):
         if not self.enemies_on:
@@ -1221,7 +1247,6 @@ class Game:
         if station_id == "B":
             for cell in HIDDEN_CLOSET_CELLS:
                 self.grid[cell[1]][cell[0]] = "."
-            self.hidden_revealed = True
 
     def _maybe_advance_stage(self):
         """A level's gate opens only once its last station is solved AND
@@ -1247,7 +1272,7 @@ class Game:
 
     # -- lifecycle -------------------------------------------------------
     def retry(self):
-        self.lives = 3
+        self.lives = MAX_LIVES
         self.px, self.py = PLAYER_START
         self.invuln = 10
         self.mode = "overworld"
@@ -1291,7 +1316,7 @@ class Game:
 # actually calibrated for readability against *that* terminal's background,
 # light or dark.
 
-CP_PLAYER = CP_ENEMY = CP_DOOR = CP_COMP = CP_COIN = CP_OK = CP_ERR = 0
+CP_PLAYER = CP_ENEMY = CP_DOOR = CP_COMP = CP_COIN = CP_OK = CP_ERR = CP_GOOD = CP_WALL = 0
 
 
 def setup_colors(high_contrast=False):
@@ -1299,8 +1324,8 @@ def setup_colors(high_contrast=False):
     underline — attributes every terminal renders distinctly regardless of
     its color palette or a player's color vision, for setups where the
     default colors don't read well."""
-    global CP_PLAYER, CP_ENEMY, CP_DOOR, CP_COMP, CP_COIN, CP_OK, CP_ERR
-    CP_PLAYER = CP_ENEMY = CP_DOOR = CP_COMP = CP_COIN = CP_OK = CP_ERR = 0
+    global CP_PLAYER, CP_ENEMY, CP_DOOR, CP_COMP, CP_COIN, CP_OK, CP_ERR, CP_GOOD, CP_WALL
+    CP_PLAYER = CP_ENEMY = CP_DOOR = CP_COMP = CP_COIN = CP_OK = CP_ERR = CP_GOOD = CP_WALL = 0
     if high_contrast:
         CP_PLAYER = curses.A_BOLD | curses.A_REVERSE
         CP_ENEMY = curses.A_BOLD | curses.A_UNDERLINE | curses.A_REVERSE
@@ -1309,6 +1334,7 @@ def setup_colors(high_contrast=False):
         CP_COIN = curses.A_BOLD
         CP_OK = curses.A_BOLD | curses.A_REVERSE
         CP_ERR = curses.A_BOLD | curses.A_UNDERLINE | curses.A_REVERSE
+        CP_GOOD = curses.A_BOLD | curses.A_REVERSE
         return
     if not curses.has_colors():
         return
@@ -1317,6 +1343,8 @@ def setup_colors(high_contrast=False):
         curses.init_pair(2, curses.COLOR_RED, -1)
         curses.init_pair(3, curses.COLOR_YELLOW, -1)
         curses.init_pair(4, curses.COLOR_BLUE, -1)
+        curses.init_pair(5, curses.COLOR_GREEN, -1)
+        curses.init_pair(6, curses.COLOR_CYAN, -1)
         CP_PLAYER = curses.color_pair(1) | curses.A_BOLD
         CP_ENEMY = curses.color_pair(2) | curses.A_BOLD
         CP_DOOR = curses.color_pair(3) | curses.A_BOLD
@@ -1324,6 +1352,8 @@ def setup_colors(high_contrast=False):
         CP_COIN = 0                                    # deliberately uncolored
         CP_OK = curses.color_pair(1) | curses.A_BOLD    # same family as "you"
         CP_ERR = curses.color_pair(2) | curses.A_BOLD
+        CP_GOOD = curses.color_pair(5) | curses.A_BOLD  # solved / unlocked / the way out
+        CP_WALL = curses.color_pair(6)                  # structure: walls and popup frames
     except curses.error:
         pass
 
@@ -1332,7 +1362,17 @@ FACING_GLYPH = {"up": "▲", "down": "▼", "left": "◀", "right": "▶"}
 
 WALL_GLYPH = "█"
 CELL_W = 2  # each map tile is drawn 2 terminal columns wide — makes it read as blocky/square
-LEGEND = "[▶] you    x enemy    ▓ locked door    ▣A terminal    * coin    X exit"
+FOG_GLYPH = "░"
+# (text, style) for each legend entry — the style is looked up at draw time
+# because the CP_* values change when high-contrast mode is toggled.
+LEGEND_TOKENS = (
+    ("[▶] you", lambda: CP_PLAYER),
+    ("x enemy", lambda: CP_ENEMY),
+    ("▓ locked door", lambda: CP_DOOR),
+    ("▣A terminal", lambda: CP_COMP),
+    ("* coin", lambda: CP_COIN | curses.A_BOLD),
+    ("X exit", lambda: CP_GOOD),
+)
 
 
 def tile_glyph(game, x, y):
@@ -1362,13 +1402,13 @@ def tile_glyph(game, x, y):
 
 
 _TILE_STYLE_KEYS = {
-    "wall": lambda: curses.A_DIM,
+    "wall": lambda: CP_WALL | curses.A_DIM,
     "coin": lambda: CP_COIN | curses.A_BOLD,
     "computer": lambda: CP_COMP | curses.A_BOLD,
     "sign": lambda: curses.A_BOLD,
     "door_locked": lambda: CP_DOOR | curses.A_BOLD,
-    "door_unlocked": lambda: CP_DOOR | curses.A_DIM,
-    "exit": lambda: CP_OK | curses.A_BOLD,
+    "door_unlocked": lambda: CP_GOOD | curses.A_DIM,
+    "exit": lambda: CP_GOOD | curses.A_BOLD,
     "floor": lambda: curses.A_DIM,
 }
 
@@ -1384,6 +1424,9 @@ def _zone_for(x, y):
         return None
     boundary_x = _room_bounds(2)[0]  # E/F start here; G/H sit to its left
     return 2 if x >= boundary_x else 3
+
+
+ZONE_MAP = [[_zone_for(x, y) for x in range(GRID_W)] for y in range(GRID_H)]
 
 
 def _zone_banners(game):
@@ -1405,141 +1448,191 @@ def _zone_banners(game):
     return []
 
 
-def draw_base(stdscr, game, dim=False):
+def _put(stdscr, y, x, text, style=0):
+    """addstr that never raises: a write that doesn't fit the window is
+    simply dropped (a shrinking terminal must not crash the game)."""
+    if text:
+        try:
+            stdscr.addstr(y, x, text, style)
+        except curses.error:
+            pass
+
+
+def _put_runs(stdscr, y, x, runs, limit):
+    """Draw (text, style) runs left to right, clipped at column `limit`."""
+    for text, style in runs:
+        text = text[: max(0, limit - x)]
+        _put(stdscr, y, x, text, style)
+        x += len(text)
+
+
+def _cell(game, x, y, backdrop):
+    """(text, style) for the CELL_W-column tile at (x, y), fog and animation
+    included. Pure apart from reading the game, so it's easy to test."""
+    base = curses.A_DIM if backdrop else 0
+    zone = ZONE_MAP[y][x]
+    if zone is not None and zone > game.stage:
+        return FOG_GLYPH * CELL_W, curses.A_DIM | base
+    if game.grid[y][x] == "#":      # the most common tile: skip the full classifier
+        return WALL_GLYPH * CELL_W, _TILE_STYLE_KEYS["wall"]() | base
+    glyph, kind = tile_glyph(game, x, y)
+    style = _TILE_STYLE_KEYS[kind]()
+    if kind == "computer":
+        # the station's letter sits next to it, so the A-to-H order is
+        # readable on the map; a solved one fades to a dim green
+        sid = game.computers[(x, y)]
+        text = glyph + sid
+        if game.stations[sid].solved:
+            style = CP_GOOD | curses.A_DIM
+    else:
+        text = glyph + " "
+        if kind == "coin" and (game.tick_count // 2 + x * 3 + y) % 8 == 0:
+            style = CP_COIN | curses.A_DIM       # a twinkle that ripples across the coins
+        elif kind == "exit" and game.next_station() is None and (game.tick_count // 3) % 2 == 0:
+            style |= curses.A_REVERSE            # every station is done: the exit pulses
+    return text, style | base
+
+
+def _draw_map(stdscr, game, ox, oy, backdrop):
+    """Draw the tile grid one row at a time, merging neighbouring tiles that
+    share a style into a single write (~900 addstr calls a frame -> ~150)."""
+    for y in range(GRID_H):
+        run_x, run_text, run_style = 0, "", None
+        for x in range(GRID_W):
+            text, style = _cell(game, x, y, backdrop)
+            if style != run_style:
+                _put(stdscr, oy + y, ox + run_x * CELL_W, run_text, run_style)
+                run_x, run_text, run_style = x, "", style
+            run_text += text
+        _put(stdscr, oy + y, ox + run_x * CELL_W, run_text, run_style)
+
+
+def _draw_hud(stdscr, game, w, ox, oy):
+    """Title bar above the map; status, legend, hints and messages below it."""
+    limit = w - 1
+    total = len(STATION_ORDER)
+    _put_runs(stdscr, 0, 0, [("TERMINALQUEST", CP_PLAYER), (" — SIGNAL LOST", curses.A_DIM)], limit)
+    tag = f"LEVEL {min(game.stage, len(STAGES))}/{len(STAGES)}"
+    _put_runs(stdscr, 0, ox + GRID_W * CELL_W - len(tag), [(tag, CP_WALL | curses.A_BOLD)], limit)
+    _put(stdscr, 1, 0, "arrow keys move — walk into things"[:limit], curses.A_DIM)
+
+    y = oy + GRID_H + 1
+    solved = game.solved_count()
+    lives = max(0, min(game.lives, MAX_LIVES))
+    nxt = game.next_station()
+    _put_runs(stdscr, y, 0, [
+        ("♥" * lives, CP_ENEMY), ("♡" * (MAX_LIVES - lives), curses.A_DIM),
+        ("   ", 0), (f"*{game.score}", curses.A_BOLD),
+        ("   ", 0), ("▰" * solved, CP_GOOD), ("▱" * (total - solved), curses.A_DIM),
+        (f" {solved}/{total} stations", 0),
+        ((f"   next: terminal {nxt}", 0) if nxt else ("   all stations done - head for X", CP_GOOD)),
+        (f"   [q] quit  [e] enemies {'on' if game.enemies_on else 'off'}"
+         f"  [b] sound {'on' if game.sound_on else 'off'}", curses.A_DIM),
+    ], limit)
+
+    legend = []
+    for text, style in LEGEND_TOKENS:
+        legend += [(text, style()), ("    ", 0)]
+    _put_runs(stdscr, y + 1, 0, legend[:-1], limit)
+
+    cur_stage = STAGES[game.stage - 1] if 1 <= game.stage <= len(STAGES) else None
+    if cur_stage and cur_stage["gate_door"] and game.doors[cur_stage["gate_door"]]["locked"]:
+        need = len(cur_stage["coins"])
+        remaining = sum(1 for p in cur_stage["coins"] if game.coins.get(p, False))
+        _put(stdscr, y + 2, 0,
+             f"the way on is sealed — clear this level first ({need - remaining}/{need} coins found)"[:limit],
+             CP_DOOR | curses.A_DIM)
+    elif game.learned:
+        _put(stdscr, y + 2, 0, ("so far: " + "  ·  ".join(game.learned))[:limit], CP_GOOD)
+    if game.message:
+        style = curses.A_BOLD | (curses.A_REVERSE if game.flash > 0 else 0)
+        _put(stdscr, y + 3, 0, game.message[:limit], style)
+
+
+def draw_base(stdscr, game, backdrop=False):
     """Renders the world. Used both for the normal overworld screen AND as
-    the (dimmed) backdrop behind sign/terminal/congrats popups, so those
-    never feel like a separate app — the world is still right there, just
-    paused."""
+    the dimmed backdrop behind sign/terminal/congrats popups (backdrop=True:
+    no HUD and no sealed-level banners, so nothing peeks out around the
+    popup), so those never feel like a separate app — the world is still
+    right there, just paused."""
     stdscr.erase()
     h, w = stdscr.getmaxyx()
-    base_dim = curses.A_DIM if dim else 0
+    base_dim = curses.A_DIM if backdrop else 0
 
     # A level is drawn once you've reached it, and stays drawn from then on
     # — clearing a level doesn't put it back under fog. Only what's still
     # ahead of you renders as a sealed block.
     ox, oy = 1, 3
-    for y in range(GRID_H):
-        for x in range(GRID_W):
-            zone = _zone_for(x, y)
-            if zone is not None and zone > game.stage:
-                try:
-                    stdscr.addstr(oy + y, ox + x * CELL_W, WALL_GLYPH * CELL_W,
-                                  curses.A_DIM | base_dim)
-                except curses.error:
-                    pass
-                continue
-            glyph, kind = tile_glyph(game, x, y)
-            cell = glyph * CELL_W if kind == "wall" else glyph + " "
-            style = _TILE_STYLE_KEYS[kind]() | base_dim
-            if kind == "computer":
-                # the station's letter sits next to it, so the A-to-H order
-                # is readable on the map; a solved one dims out
-                sid = game.computers[(x, y)]
-                cell = glyph + sid
-                if game.stations[sid].solved:
-                    style = CP_COMP | curses.A_DIM | base_dim
-            try:
-                stdscr.addstr(oy + y, ox + x * CELL_W, cell, style)
-            except curses.error:
-                pass
+    _draw_map(stdscr, game, ox, oy, backdrop)
 
-    for banner, row, x0, x1 in _zone_banners(game):
-        center = (ox + x0 * CELL_W + ox + x1 * CELL_W) // 2
-        banner_x0 = max(0, center - len(banner) // 2)
-        try:
-            stdscr.addstr(oy + row, banner_x0, banner,
-                          curses.A_BOLD | curses.A_REVERSE | base_dim)
-        except curses.error:
-            pass
+    if not backdrop:
+        for banner, row, x0, x1 in _zone_banners(game):
+            center = (ox + x0 * CELL_W + ox + x1 * CELL_W) // 2
+            _put(stdscr, oy + row, max(0, center - len(banner) // 2), banner,
+                 curses.A_BOLD | curses.A_REVERSE)
 
     blink = (game.tick_count // 2) % 2 == 0
     for e in (game.enemies if game.enemies_on else ()):
         zone = _zone_for(e["x"], e["y"])
         if zone is not None and zone > game.stage:
             continue
-        try:
-            stdscr.addstr(oy + e["y"], ox + e["x"] * CELL_W, "x" if blink else "+",
-                          CP_ENEMY | curses.A_BOLD | base_dim)
-        except curses.error:
-            pass
+        _put(stdscr, oy + e["y"], ox + e["x"] * CELL_W, "x" if blink else "+",
+             CP_ENEMY | curses.A_BOLD | base_dim)
 
     pstyle = CP_PLAYER | curses.A_BOLD
     if game.invuln > 0 and game.invuln % 2 == 0:
         pstyle |= curses.A_DIM
-    try:
-        # "[▶]": the arrow between brackets, so you never lose yourself among
-        # the dots. Each tile is 2 columns wide; the "[" borrows the blank
-        # column to the left and the "]" the blank column to the right.
-        stdscr.addstr(oy + game.py, ox + game.px * CELL_W - 1,
-                      "[" + FACING_GLYPH[game.facing] + "]", pstyle | base_dim)
-    except curses.error:
-        pass
+    # "[▶]": the arrow between brackets, so you never lose yourself among
+    # the dots. Each tile is 2 columns wide; the "[" borrows the blank
+    # column to the left and the "]" the blank column to the right.
+    _put(stdscr, oy + game.py, ox + game.px * CELL_W - 1,
+         "[" + FACING_GLYPH[game.facing] + "]", pstyle | base_dim)
 
-    title_style = curses.A_BOLD | base_dim
-    try:
-        stdscr.addstr(0, 0, "TERMINALQUEST — SIGNAL LOST", title_style)
-        stdscr.addstr(1, 0, "arrow keys move — walk into things"[: w - 1], curses.A_DIM | base_dim)
-    except curses.error:
-        pass
-
-    hud_y = oy + GRID_H + 1
-    hearts = "♥" * max(0, game.lives)
-    try:
-        nxt = game.next_station()
-        hud = (f"{hearts}   *{game.score}   {game.solved_count()}/8 stations"
-               + (f"   next: terminal {nxt}" if nxt else "   all stations done - head for X")
-               + f"   [q] quit  [e] enemies {'on' if game.enemies_on else 'off'}"
-               + f"  [b] sound {'on' if game.sound_on else 'off'}")
-        stdscr.addstr(hud_y, 0, hud[: w - 1], base_dim)
-        stdscr.addstr(hud_y + 1, 0, LEGEND[: w - 1], curses.A_DIM | base_dim)
-    except curses.error:
-        pass
-    cur_stage = STAGES[game.stage - 1] if 1 <= game.stage <= len(STAGES) else None
-    if cur_stage and cur_stage["gate_door"] and game.doors[cur_stage["gate_door"]]["locked"]:
-        need = len(cur_stage["coins"])
-        remaining = sum(1 for p in cur_stage["coins"] if game.coins.get(p, False))
-        note = f"the way on is sealed — clear this level first ({need - remaining}/{need} coins found)"
-        try:
-            stdscr.addstr(hud_y + 2, 0, note[: w - 1], curses.A_DIM | base_dim)
-        except curses.error:
-            pass
-    elif game.learned:
-        learned_line = "so far: " + "  ·  ".join(game.learned)
-        try:
-            stdscr.addstr(hud_y + 2, 0, learned_line[: w - 1], CP_OK | base_dim)
-        except curses.error:
-            pass
-    if game.message and not dim:
-        style = curses.A_BOLD | (curses.A_REVERSE if game.flash > 0 else 0)
-        try:
-            stdscr.addstr(hud_y + 3, 0, game.message[: w - 1], style)
-        except curses.error:
-            pass
+    if not backdrop:
+        _draw_hud(stdscr, game, w, ox, oy)
     return h, w
 
 
 def draw_overworld(stdscr, game):
-    draw_base(stdscr, game, dim=False)
+    draw_base(stdscr, game)
+    stdscr.refresh()
+
+
+def _box(stdscr, top, left, bw, bh):
+    """An opaque, framed rectangle: border rows at top-1 and top+bh, with bh
+    interior rows between them."""
+    frame = CP_WALL | curses.A_BOLD
+    _put(stdscr, top - 1, left, "┌" + "─" * (bw - 2) + "┐", frame)
+    for i in range(bh):
+        _put(stdscr, top + i, left, "│" + " " * (bw - 2) + "│", frame)
+    _put(stdscr, top + bh, left, "└" + "─" * (bw - 2) + "┘", frame)
+
+
+def _popup(stdscr, game, rows, width=64, center=False):
+    """A framed box over the dimmed map. `rows` is a list of (text, style);
+    long text wraps, and a blank row of padding sits above and below. A row's
+    style spans the box's full width, so a reversed row reads as a bar."""
+    h, w = draw_base(stdscr, game, backdrop=True)
+    box_w = max(10, min(width, w - 4))     # never narrower than the frame itself: a window
+                                           # dragged tiny mid-frame must not hand textwrap a negative width
+    lines = [("", 0)]
+    for text, style in rows:
+        for ln in (textwrap.wrap(text, width=box_w - 6) or [""]):
+            lines.append((ln, style))
+    lines.append(("", 0))
+    top = max(2, h // 2 - len(lines) // 2 - 1)
+    left = max(1, (w - box_w) // 2)
+    _box(stdscr, top, left, box_w, len(lines))
+    for i, (ln, style) in enumerate(lines):
+        text = ln.center(box_w - 2) if center else (" " + ln).ljust(box_w - 2)
+        _put(stdscr, top + i, left + 1, text, style)
     stdscr.refresh()
 
 
 def draw_sign(stdscr, game):
-    h, w = draw_base(stdscr, game, dim=True)
-    lines = []
-    for para in game.sign_text.split("\n"):
-        lines.extend(textwrap.wrap(para, width=min(56, w - 10)) or [""])
-    box_w = min(60, w - 4)
-    top = max(1, h // 2 - len(lines) // 2 - 2)
-    left = max(1, (w - box_w) // 2)
-    try:
-        stdscr.addstr(top - 1, left, "┌" + "─" * (box_w - 2) + "┐", curses.A_BOLD)
-        for i, ln in enumerate(lines):
-            stdscr.addstr(top + i, left, "│ " + ln.ljust(box_w - 4) + " │", curses.A_BOLD)
-        stdscr.addstr(top + len(lines), left, "└" + "─" * (box_w - 2) + "┘", curses.A_BOLD)
-        stdscr.addstr(top + len(lines) + 1, left, "(press any key)".center(box_w), curses.A_DIM)
-    except curses.error:
-        pass
-    stdscr.refresh()
+    paras = game.sign_text.split("\n")
+    _popup(stdscr, game, [(p, curses.A_BOLD) for p in paras] + [("", 0), ("(press any key)", curses.A_DIM)],
+           width=60)
 
 
 def draw_congrats(stdscr, game):
@@ -1550,46 +1643,9 @@ def draw_congrats(stdscr, game):
     into the last coin, so movement keys are ignored here on purpose. The
     continue prompt is drawn as its own solid highlighted bar inside the
     box, not a dim line easy to miss underneath it."""
-    h, w = draw_base(stdscr, game, dim=True)
-    lines = game.congrats_text.split("\n") + ["", "PRESS SPACE TO CONTINUE"]
-    box_w = min(60, w - 4)
-    top = max(1, h // 2 - len(lines) // 2 - 2)
-    left = max(1, (w - box_w) // 2)
-    try:
-        stdscr.addstr(top - 1, left, "┌" + "─" * (box_w - 2) + "┐", curses.A_BOLD)
-        for i, ln in enumerate(lines):
-            if ln == "PRESS SPACE TO CONTINUE":
-                style = curses.A_BOLD | curses.A_REVERSE
-            elif ln:
-                style = CP_OK | curses.A_BOLD
-            else:
-                style = 0
-            stdscr.addstr(top + i, left, "│ " + ln.center(box_w - 4) + " │", style)
-        stdscr.addstr(top + len(lines), left, "└" + "─" * (box_w - 2) + "┘", curses.A_BOLD)
-    except curses.error:
-        pass
-    stdscr.refresh()
-
-
-def _popup(stdscr, game, rows, width=64):
-    """A centered box over the dimmed map. `rows` is a list of (text, style);
-    long text wraps. Used by the quiz screens."""
-    h, w = draw_base(stdscr, game, dim=True)
-    box_w = min(width, w - 4)
-    lines = []
-    for text, style in rows:
-        for ln in (textwrap.wrap(text, width=box_w - 4) or [""]):
-            lines.append((ln, style))
-    top = max(1, h // 2 - len(lines) // 2 - 2)
-    left = max(1, (w - box_w) // 2)
-    try:
-        stdscr.addstr(top - 1, left, "┌" + "─" * (box_w - 2) + "┐", curses.A_BOLD)
-        for i, (ln, style) in enumerate(lines):
-            stdscr.addstr(top + i, left, "│ " + ln.ljust(box_w - 4) + " │", style)
-        stdscr.addstr(top + len(lines), left, "└" + "─" * (box_w - 2) + "┘", curses.A_BOLD)
-    except curses.error:
-        pass
-    stdscr.refresh()
+    rows = [(ln, CP_OK | curses.A_BOLD if ln else 0) for ln in game.congrats_text.split("\n")]
+    rows += [("", 0), ("PRESS SPACE TO CONTINUE", curses.A_BOLD | curses.A_REVERSE)]
+    _popup(stdscr, game, rows, width=60, center=True)
 
 
 def draw_quitconfirm(stdscr, game):
@@ -1597,7 +1653,7 @@ def draw_quitconfirm(stdscr, game):
         ("QUIT TERMINALQUEST?", CP_OK | curses.A_BOLD), ("", 0),
         ("Your progress this run isn't saved.", 0), ("", 0),
         ("Y = quit     N = keep playing", curses.A_BOLD | curses.A_REVERSE),
-    ], width=44)
+    ], width=44, center=True)
 
 
 def draw_quizoffer(stdscr, game):
@@ -1607,7 +1663,7 @@ def draw_quizoffer(stdscr, game):
         (f"{QUIZ_LEN} short questions on what you just learned. Totally optional.", 0),
         ("", 0),
         ("Y = take the quiz     N = skip", curses.A_BOLD | curses.A_REVERSE),
-    ])
+    ], center=True)
 
 
 def draw_quiz(stdscr, game):
@@ -1618,11 +1674,11 @@ def draw_quiz(stdscr, game):
     if q["kind"] == "choice":
         for i, opt in enumerate(q["options"]):
             marker = "> " if (z["phase"] == "feedback" and i == q["correct"]) else "  "
-            rows.append((f"{marker}{i + 1}) {opt}", 0))
+            rows.append((f"{marker}{i + 1}) {opt}", CP_GOOD if marker.strip() else 0))
         rows.append(("", 0))
     for ln in z["lines"]:
         bad = ln.startswith("bash said") or ln.startswith("Not quite")
-        rows.append((ln, CP_ERR if bad else CP_OK))
+        rows.append((ln, CP_ERR if bad else CP_GOOD))
     if z["phase"] == "feedback":
         last = z["idx"] + 1 >= len(z["items"])
         rows += [("", 0), ("PRESS SPACE TO " + ("FINISH" if last else "CONTINUE"), curses.A_BOLD | curses.A_REVERSE)]
@@ -1640,7 +1696,7 @@ def draw_quizdone(stdscr, game):
         ("QUIZ COMPLETE", CP_OK | curses.A_BOLD), ("", 0),
         (f"You got {z['right']} of {len(z['items'])} right.", 0), ("", 0),
         ("PRESS SPACE TO CONTINUE", curses.A_BOLD | curses.A_REVERSE),
-    ])
+    ], center=True)
 
 
 def _first_word(line):
@@ -1663,12 +1719,12 @@ def draw_terminal(stdscr, game):
     always visible (not a one-time card), with the real prompt below them.
     Sized responsively — it grows with the terminal window instead of
     sitting at one small fixed size."""
-    h, w = draw_base(stdscr, game, dim=True)
+    h, w = draw_base(stdscr, game, backdrop=True)
     st = game.stations[game.active_station]
     sid = game.active_station
 
-    box_h = min(22, h - 6)
-    box_w = min(100, w - 4)
+    box_h = max(4, min(11 if st.solved else 22, h - 6))
+    box_w = max(10, min(100, w - 4))
     top = max(2, h - box_h - 3)
     left = max(1, (w - box_w) // 2)
 
@@ -1686,13 +1742,7 @@ def draw_terminal(stdscr, game):
         except curses.error:
             pass
 
-    try:
-        stdscr.addstr(top - 1, left, "┌" + "─" * (box_w - 2) + "┐", curses.A_BOLD)
-        for i in range(box_h):
-            stdscr.addstr(top + i, left, "│" + " " * (box_w - 2) + "│")
-        stdscr.addstr(top + box_h, left, "└" + "─" * (box_w - 2) + "┘", curses.A_BOLD)
-    except curses.error:
-        pass
+    _box(stdscr, top, left, box_w, box_h)
 
     put(top - 1, left + 2, f" {st.clue} ", curses.A_BOLD)
     progress = f"{game.solved_count()}/8 STATIONS"
@@ -1701,8 +1751,13 @@ def draw_terminal(stdscr, game):
     if st.solved:
         countdown = "." * (1 + game.return_timer // 5)
         full_bar(top + 2, f" ✓ DOOR {sid}: SOLVED — {st.resolved_explain}",
-                 CP_OK | curses.A_BOLD | curses.A_REVERSE)
-        put(top + 4, left + 3, f"heading back to the ship{countdown}", curses.A_DIM)
+                 CP_GOOD | curses.A_BOLD | curses.A_REVERSE)
+        if st.transcript:
+            _, out = st.transcript[-1]
+            put(top + 4, left + 3, f"$ {st.last_command}", curses.A_BOLD)
+            for i, ln in enumerate([l for l in out.split("\n") if l.strip()][: box_h - 8]):
+                put(top + 5 + i, left + 5, ln)
+        put(top + box_h - 2, left + 3, f"heading back to the ship{countdown}", curses.A_DIM)
         try:
             stdscr.addstr(top + box_h + 1, left, "(press anything to go now)"[: box_w], curses.A_DIM)
         except curses.error:
@@ -1732,8 +1787,10 @@ def draw_terminal(stdscr, game):
         put(task_y + 1 + i, left + 5, line)
 
     progress_y = task_y + 1 + len(task_lines) + 1
-    dots = "●" * game.solved_count() + "○" * (8 - game.solved_count())
-    put(progress_y, left + 3, f"{dots}   {game.solved_count()}/8 STATIONS CLEARED", curses.A_DIM | curses.A_BOLD)
+    done, total = game.solved_count(), len(STATION_ORDER)
+    put(progress_y, left + 3, "●" * done, CP_GOOD)
+    put(progress_y, left + 3 + done, "○" * (total - done), curses.A_DIM)
+    put(progress_y, left + 3 + total, f"   {done}/{total} STATIONS CLEARED", curses.A_DIM | curses.A_BOLD)
 
     # -- last result + optional "why", anchored from the bottom ---------
     if st.transcript:
@@ -1770,21 +1827,23 @@ def draw_terminal(stdscr, game):
 def draw_gameover(stdscr, game):
     stdscr.erase()
     h, w = stdscr.getmaxyx()
-    msg = ["GAME OVER", "", "press any key to try again, or q to quit"]
-    for i, ln in enumerate(msg):
-        style = (CP_ERR | curses.A_BOLD) if i == 0 else 0
-        try:
-            stdscr.addstr(h // 2 - 1 + i, max(0, (w - len(ln)) // 2), ln, style)
-        except curses.error:
-            pass
+    msg = [
+        ("GAME OVER", CP_ERR | curses.A_BOLD),
+        ("", 0),
+        (f"stations cleared {game.solved_count()}/{len(STATION_ORDER)}     coins *{game.score}", 0),
+        ("", 0),
+        ("press any key to try again, or q to quit", curses.A_DIM),
+    ]
+    for i, (ln, style) in enumerate(msg):
+        _put(stdscr, h // 2 - 2 + i, max(0, (w - len(ln)) // 2), ln, style)
     stdscr.refresh()
 
 
 def draw_intro(stdscr, game):
     stdscr.erase()
     h, w = stdscr.getmaxyx()
-    lines = [
-        ("TERMINALQUEST", curses.A_BOLD | CP_OK),
+    banner = render_banner("TERMINALQUEST")
+    body = [
         ("signal lost", curses.A_DIM),
         ("", 0),
         ("The ship's gone quiet. Eight stations, one signal.", 0),
@@ -1793,26 +1852,32 @@ def draw_intro(stdscr, game):
         ("            you're the arrow — it points the way you're facing", curses.A_DIM),
         ("", 0),
         ("walk into things to interact with them:", 0),
-        ("  x  " + " " * 1 + "a patrol — touching one costs a life", CP_ENEMY),
-        ("  ▓  " + " " * 1 + "a locked door — find a way to open it", CP_DOOR),
-        ("  ▣  " + " " * 1 + "an old terminal — try typing something", CP_COMP),
-        ("  *  " + " " * 1 + "worth grabbing", CP_COIN),
-        ("  X  " + " " * 1 + "the way out", CP_OK),
+        ("  x   a patrol — touching one costs a life", CP_ENEMY),
+        ("  ▓   a locked door — find a way to open it", CP_DOOR),
+        ("  ▣   an old terminal — try typing something", CP_COMP),
+        ("  *   worth grabbing", CP_COIN | curses.A_BOLD),
+        ("  X   the way out", CP_GOOD),
         ("", 0),
         ("press any key to start", curses.A_BOLD | curses.A_REVERSE),
     ]
-    top = max(1, h // 2 - len(lines) // 2 - 2)
-    for i, (text, style) in enumerate(lines):
-        try:
-            stdscr.addstr(top + i, max(2, (w - 60) // 2), text, style)
-        except curses.error:
-            pass
+    top = max(1, (h - len(banner) - 1 - len(body)) // 2)
+    banner_w = max(len(r) for r in banner)
+    gradient = (CP_PLAYER, CP_COMP, CP_WALL | curses.A_BOLD)
+    for i, row in enumerate(banner):
+        _put(stdscr, top + i, max(0, (w - banner_w) // 2), row, gradient[i % len(gradient)])
+    body_x = max(2, (w - 60) // 2)
+    for i, (text, style) in enumerate(body):
+        if i == 0:   # the tagline sits centered right under the banner
+            _put(stdscr, top + len(banner), max(0, (w - len(text)) // 2), text, style)
+        else:
+            _put(stdscr, top + len(banner) + 1 + i, body_x, text, style)
     stdscr.refresh()
 
 
 # A tiny hand-built block font, 5 rows tall, just wide enough to spell the
-# final win banner out of actual characters instead of a plain sentence —
-# "make a design out of the characters." Only the letters the banner needs.
+# title and the final win banner out of actual characters instead of a plain
+# sentence — "make a design out of the characters." Only the letters those
+# two banners need.
 _BANNER_FONT = {
     "Y": ["#   #", " # # ", "  #  ", "  #  ", "  #  "],
     "O": [" ### ", "#   #", "#   #", "#   #", " ### "],
@@ -1820,20 +1885,36 @@ _BANNER_FONT = {
     "W": ["#   #", "#   #", "# # #", "## ##", "#   #"],
     "I": ["#####", "  #  ", "  #  ", "  #  ", "#####"],
     "N": ["#   #", "##  #", "# # #", "#  ##", "#   #"],
+    "T": ["#####", "  #  ", "  #  ", "  #  ", "  #  "],
+    "E": ["#####", "#    ", "#### ", "#    ", "#####"],
+    "R": ["#### ", "#   #", "#### ", "#  # ", "#   #"],
+    "M": ["#   #", "## ##", "# # #", "#   #", "#   #"],
+    "A": [" ### ", "#   #", "#####", "#   #", "#   #"],
+    "L": ["#    ", "#    ", "#    ", "#    ", "#####"],
+    "Q": [" ### ", "#   #", "# # #", "#  # ", " ## #"],
+    "S": [" ####", "#    ", " ### ", "    #", "#### "],
     " ": ["  ", "  ", "  ", "  ", "  "],
 }
 
 
+BANNER_BLOCK = "█"
+_HALF = {(False, False): " ", (True, True): BANNER_BLOCK, (True, False): "▀", (False, True): "▄"}
+
+
 def render_banner(word):
-    """Render `word` as 5 lines of block-letter ASCII art, one string per
-    row, letters separated by a single blank column. Falls back to a blank
-    glyph for any character not in the tiny font above."""
-    rows = ["" for _ in range(5)]
+    """Render `word` as big block letters, one string per text row. Each text
+    row packs two rows of the font's pixels using half-blocks (▀ ▄ █), so a
+    pixel comes out square instead of a tall sliver and the 5-pixel-tall
+    letters take 3 terminal rows. Letters are separated by one blank column;
+    a character not in the tiny font above renders as a gap."""
+    pixels = ["" for _ in range(6)]     # 5 font rows + 1 blank so they pair up evenly
     for ch in word.upper():
         glyph = _BANNER_FONT.get(ch, _BANNER_FONT[" "])
         for r in range(5):
-            rows[r] += glyph[r] + " "
-    return [r.rstrip() for r in rows]
+            pixels[r] += glyph[r] + " "
+        pixels[5] += " " * (len(glyph[0]) + 1)
+    return ["".join(_HALF[(top == "#", bottom == "#")] for top, bottom in zip(pixels[r], pixels[r + 1])).rstrip()
+            for r in (0, 2, 4)]
 
 
 def draw_win(stdscr, game, typed="", error=None):
@@ -1969,6 +2050,9 @@ def wait_for_quit(stdscr, game=None):
         ch = stdscr.getch()
         if ch == -1:
             continue
+        if ch == curses.KEY_RESIZE:
+            stdscr.clear()
+            continue
         if ch in (curses.KEY_ENTER, 10, 13):
             if armed:
                 return
@@ -2032,6 +2116,49 @@ def handle_quiz_key(game, ch):
             game.quiz_finish()
 
 
+# One renderer per game mode (the win screen is special: it owns its own loop).
+DRAWERS = {
+    "overworld": draw_overworld,
+    "sign": draw_sign,
+    "congrats": draw_congrats,
+    "terminal": draw_terminal,
+    "quitconfirm": draw_quitconfirm,
+    "quizoffer": draw_quizoffer,
+    "quiz": draw_quiz,
+    "quizdone": draw_quizdone,
+    "gameover": draw_gameover,
+}
+
+TICK_SECONDS = 0.1   # game time: enemies, flashes, invulnerability all run on this beat
+MAX_CATCHUP = 3      # most ticks run back-to-back after a stall (a slow command)
+
+
+class FixedStep:
+    """A fixed-timestep clock. Game time must advance with the wall clock,
+    not with the number of loop iterations: getch() returns instantly on
+    every keypress, so ticking once per iteration made a held arrow key
+    run enemies and timers about 3x too fast. `due(now)` says how many
+    ticks are owed; after a long stall (a command that took seconds) it
+    drops the backlog instead of fast-forwarding the world."""
+
+    def __init__(self, step, now):
+        self.step = step
+        self.next = now + step
+
+    def due(self, now):
+        n = 0
+        while now >= self.next and n < MAX_CATCHUP:
+            self.next += self.step
+            n += 1
+        if now >= self.next:
+            self.next = now + self.step
+        return n
+
+    def wait_ms(self, now):
+        """How long getch() may block before the next tick is due."""
+        return max(1, int((self.next - now) * 1000))
+
+
 def main(stdscr):
     curses.curs_set(0)
     try:
@@ -2046,27 +2173,35 @@ def main(stdscr):
     global LAST_GAME
     game = Game(root, reset=reset, enemies="--no-enemies" not in sys.argv)
     LAST_GAME = game
-    stdscr.timeout(100)  # ms per tick
+    # Block until a REAL keypress — a timed getch() returns -1 and the
+    # intro would flash for a tenth of a second, unread. A window resize
+    # arrives as a pseudo-key (KEY_RESIZE): repaint for the new size and keep
+    # waiting rather than treating it as "any key".
+    stdscr.timeout(-1)
+    while True:
+        draw_intro(stdscr, game)
+        if stdscr.getch() != curses.KEY_RESIZE:
+            break
+        stdscr.clear()
 
-    draw_intro(stdscr, game)
-    # getch() returns -1 every 100ms with no key (see stdscr.timeout above),
-    # so wait for a REAL keypress — otherwise the intro flashes for a tenth
-    # of a second and the player never gets to read the controls.
-    while stdscr.getch() == -1:
-        pass
-
+    clock = FixedStep(TICK_SECONDS, time.monotonic())
     while True:
         h, w = stdscr.getmaxyx()
         if h < MIN_H or w < MIN_W:
             draw_too_small(stdscr)
+            stdscr.timeout(-1)       # nothing animates here; sleep until a key or a resize
             ch = stdscr.getch()
+            clock.due(time.monotonic())   # don't owe ticks for the time spent waiting
             if ch in (ord("q"), ord("Q")):
                 return
+            if ch == curses.KEY_RESIZE:
+                stdscr.clear()
             continue
 
-        game.tick()
-        if game.mode == "terminal":
-            game.tick_terminal()
+        for _ in range(clock.due(time.monotonic())):
+            game.tick()
+            if game.mode == "terminal":
+                game.tick_terminal()
         if game.bell:
             game.bell = False
             if game.sound_on:
@@ -2075,34 +2210,24 @@ def main(stdscr):
                 except curses.error:
                     pass
 
-        if game.mode == "overworld":
-            draw_overworld(stdscr, game)
-        elif game.mode == "sign":
-            draw_sign(stdscr, game)
-        elif game.mode == "congrats":
-            draw_congrats(stdscr, game)
-        elif game.mode == "terminal":
-            draw_terminal(stdscr, game)
-        elif game.mode == "quitconfirm":
-            draw_quitconfirm(stdscr, game)
-        elif game.mode == "quizoffer":
-            draw_quizoffer(stdscr, game)
-        elif game.mode == "quiz":
-            draw_quiz(stdscr, game)
-        elif game.mode == "quizdone":
-            draw_quizdone(stdscr, game)
-        elif game.mode == "gameover":
-            draw_gameover(stdscr, game)
+        drawer = DRAWERS.get(game.mode)
+        if drawer:
+            drawer(stdscr, game)
         elif game.mode == "win":
             # ":wq" then Enter — and only that — closes the game out here,
             # once it's actually over. Not "any key": a held-over arrow key
             # from walking onto the exit tile would otherwise close this
             # instantly, before the banner is even seen. wait_for_quit does
             # its own drawing so it can echo what's typed and flag mistakes.
+            stdscr.timeout(-1)       # nothing animates on the win screen
             wait_for_quit(stdscr, game)
             return
 
+        stdscr.timeout(clock.wait_ms(time.monotonic()))
         ch = stdscr.getch()
+        if ch == curses.KEY_RESIZE:
+            stdscr.clear()      # repaint from scratch at the new size; a resize is not input
+            continue
         if ch == -1:
             continue
 

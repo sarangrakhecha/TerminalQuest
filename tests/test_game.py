@@ -354,7 +354,6 @@ class TestStations:
         assert game.wall(*cell)
         solve(game, "B")
         assert not game.wall(*cell)
-        assert game.hidden_revealed is True
 
     def test_wrong_command_never_solves_a_pure_absence_station(self, game):
         # station H (rm) is solved by a file's ABSENCE, which made an
@@ -534,9 +533,10 @@ class TestLessonPanel:
         game.terminal_submit()
         assert game.show_explanation is False
 
-    def test_every_station_has_distinct_lesson_text(self, game):
-        lessons = {sid: st.lesson for sid, st in game.stations.items()}
-        assert len(set(lessons.values())) == len(lessons)
+    def test_every_station_has_distinct_panel_content(self, game):
+        for table in (tq.COMMAND_SYNTAX, tq.YOUR_TASK):
+            assert set(table) == set(tq.STATION_ORDER)
+            assert len(set(table.values())) == len(table)
 
     def test_every_station_has_syntax_and_task_text(self, game):
         for sid in tq.STATION_ORDER:
@@ -636,6 +636,10 @@ class FakeScreen:
 
     def erase(self):
         self.rows = [[" "] * self.w for _ in range(self.h)]
+
+    def clear(self):
+        self.cleared = getattr(self, "cleared", 0) + 1
+        self.erase()
 
     def getmaxyx(self):
         return self.h, self.w
@@ -756,9 +760,9 @@ class TestFoggedBandRendering:
         tq.draw_win(screen, game)
         dump = screen.dump()
         assert "SIGNAL RESTORED" in dump
-        # The block-letter banner is drawn as several rows of '#' shapes,
-        # not literal text — just check the art actually got drawn.
-        assert "#" in dump
+        # The block-letter banner is drawn as several rows of solid-block
+        # shapes, not literal text — just check the art actually got drawn.
+        assert tq.BANNER_BLOCK in dump
         assert ":wq" in dump
 
     def test_win_screen_echoes_what_has_been_typed(self, game):

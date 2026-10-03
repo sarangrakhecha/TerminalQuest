@@ -15,7 +15,7 @@ in the world reacts — a door unlocks, a gate opens, a locked room stops
 being locked. After each level there's an optional 3-question recap quiz to
 help it stick — take it or skip it.
 
-**8 commands · 8 stations · 3 levels · 407 automated tests · zero dependencies**
+**8 commands · 8 stations · 3 levels · 502 automated tests · zero dependencies**
 
 ## Contents
 
@@ -108,7 +108,14 @@ quick **3-question recap** of what that level taught: press `Y` to take it or
 These are rendered directly from the game's own drawing code (not mockups)
 — what you'd actually see in a terminal.
 
-**The overworld** — walk around, dodge patrols, find the way in:
+**The title screen** — big letters built from half-block characters, so each
+"pixel" comes out square:
+
+![Title screen](screenshots/intro.png)
+
+**The overworld** — teal walls, hatched fog over levels you haven't reached,
+a live HUD (lives, coins, a progress bar, the next terminal), and a legend
+colored to match the map:
 
 ![Overworld map](screenshots/overworld.png)
 
@@ -121,8 +128,8 @@ card that vanishes after your first visit:
 
 ![Level complete](screenshots/level_complete.png)
 
-**Finishing the game** — a block-letter banner spelled out of the
-characters themselves:
+**Finishing the game** — the same block letters, and a prompt that answers
+you if you type the wrong thing:
 
 ![You win](screenshots/you_win.png)
 
@@ -240,6 +247,7 @@ TERMINALQUEST_ROOT=/path/to/somewhere python3 terminalquest.py --reset
 | At a terminal | `Enter` | Run the line |
 | At a terminal | `?` | Explain the last result (once something's been run) |
 | At a terminal | `Esc` | Clear the line, or leave if it's already empty |
+| Anywhere | *(resize the window)* | The game repaints; below 112×28 it asks you to enlarge it, then carries on |
 | Level-complete screen | `Space` | Continue — shown as its own highlighted bar so it's easy to spot |
 | The final "you win" screen | `:wq` then `Enter` | The only way out, once the game's actually over |
 
@@ -275,6 +283,18 @@ TERMINALQUEST_ROOT=/path/to/somewhere python3 terminalquest.py --reset
 - **Resize-safe.** Every `draw_*` function tolerates a too-small or
   mid-resize terminal without crashing — `main()` re-checks the window size
   every frame and falls back to a "please resize" screen instead of raising.
+  A resize is never mistaken for a keypress (it used to restart the game from
+  the game-over screen), and it forces a full repaint.
+- **Game time follows the clock, not the keyboard.** A fixed-timestep loop
+  (10 ticks a second) drives enemies and timers. An earlier version ticked
+  once per keypress, so holding an arrow key ran the world about 2.7x too
+  fast. The loop also sleeps until the next tick is due, so an idle game uses
+  about 0.5% of a CPU core.
+- **Cheap frames.** The map is drawn a row at a time, merging neighbouring
+  tiles that share a style into one write, so a frame is ~90 draw calls
+  instead of ~930 (about a millisecond of Python). Door and zone lookups are
+  precomputed tables rather than per-tile searches. A differential test checks
+  the result is identical to drawing every tile separately.
 
 ## Design philosophy
 
@@ -307,7 +327,14 @@ accidents and jokes a curious learner might try:
   `/etc/passwd`, `..` climbs, `~`, symlinks — is refused with a friendly
   message, and a recursive `rm` aimed at the folder itself (or above it) is
   refused too;
-- a small blocklist rejects `sudo`, `rm -rf /`, fork bombs, `dd` and `mkfs`.
+- a small blocklist rejects `sudo`, `rm -rf /`, fork bombs, `dd` and `mkfs`;
+- a command gets **no keyboard** (stdin is `/dev/null`), so a bare `cat` or
+  `read` ends at once instead of swallowing your keystrokes;
+- output goes to temp files and is capped — a command can't write more than
+  1 MB (so `yes` and `yes > big.txt` are stopped by the OS), only the first
+  64 KB is shown, and undecodable bytes become `�` instead of crashing;
+- a command that runs past 10 seconds is stopped, and when any command ends
+  its whole process group is killed, so a stray `sleep 99 &` can't linger.
 
 **These are guardrails, not an operating-system security sandbox.** Command
 substitution, shell variables and scripts can still get around them.
@@ -325,10 +352,12 @@ For adversarial testing, use a disposable VM or container.
 
 ```text
 terminalquest.py      game logic, the 8-station map, shell runner, and the curses UI
-tests/test_game.py    the pytest regression suite (game logic, rendering, stations)
+tests/test_game.py    the pytest regression suite (game logic, rendering, stations)  (120 tests)
 tests/test_quiz.py    the pytest suite for the optional recap quiz (96 tests)
-tests/test_ui.py      the curses-layer tests: colors, terminal panel, main() loop, selftest (28 tests)
-tests/test_features.py  learn mode, coaching tips, map cues, quit prompt, bell, cheat sheet, CI workflow, and gap-fillers for older code paths (163 tests)
+tests/test_ui.py      the curses-layer tests: colors, terminal panel, main() loop, the fixed-step clock, selftest (37 tests)
+tests/test_features.py  learn mode, coaching tips, map cues, quit prompt, bell, cheat sheet, CI workflow, and gap-fillers for older code paths (162 tests)
+tests/test_robustness.py  hostile input: command execution, the redesigned renderer, window resizes, and a seeded fuzzer (77 tests)
+tests/test_pty_smoke.py   launches the real game in a pseudo-terminal: intro, quit, resize, Ctrl+C, held keys (10 tests)
 screenshots/          images rendered from the game's own drawing code
 README.md             this file
 ```
@@ -344,7 +373,8 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-407 tests, no real terminal required. What's actually covered:
+502 tests. Almost all run without a real terminal; a handful launch the actual game in a
+pseudo-terminal. What's actually covered:
 
 | Area | What's tested |
 |---|---|
@@ -360,7 +390,12 @@ pytest
 | Recap quiz | Every question's own stated answer passes the real-bash grader, and no do-nothing command (`true`, `pwd`, `echo hi`) passes any typed question; choice questions have exactly one valid answer; 3 distinct questions drawn from the right level's pool, reproducible with a seed; skip / hint-then-retry / reveal-after-two-misses flow; never costs lives or score; key handling and every quiz screen at several window sizes |
 | Curses layer | `setup_colors` (color, high-contrast, no-color and error paths); the terminal panel in every state at several sizes; the real `main()` loop driven by a scripted fake screen — intro, movement, signs, congrats, playing a station from the keyboard, game over, the `:wq`-then-Enter exit, and taking or declining the quiz; the built-in `selftest()` |
 | Newer features | The `[▶]` player marker for every facing and at the map edge; learn mode (patrols freeze, don't hurt, aren't drawn; `--no-enemies` and `e`); station coaching tips (none after one miss, one after two, cleared on solve, never overriding the `mkdir`/`touch` target nudge); map cues (terminal letters, dimming when solved, "next terminal" in the HUD, no fog leaks); the quit prompt (`q` alone no longer quits); the solve bell (once per solve, silent when off, survives terminals that can't beep); the exit cheat sheet; and the CI workflow file itself |
-| Resize safety | Every `draw_*` function is exercised at several window sizes — comfortably large, far too small, too narrow, too short — and must never raise |
+| Resize safety | Every `draw_*` function is exercised at several window sizes — comfortably large, far too small, too narrow, too short — and must never raise; a resize is never treated as a keypress |
+| Hostile commands | Binary and Unicode output, commands that read the keyboard, background jobs that outlive their command, runaway output, files that try to grow past the cap, timeouts and orphan cleanup |
+| The renderer | Fog vs. walls, solved terminals, coin twinkle, the pulsing exit, the HUD (hearts, progress bar, level tag, legend colors), popups that stay framed and opaque, banners; a differential test that batched drawing equals tile-by-tile drawing |
+| Fuzzing | Seeded random play through the real `main()` loop — random keys, typed commands (including hostile ones), resizes to random sizes — with invariants checked afterwards (lives in range, player never inside a wall, no exceptions) |
+| Real pseudo-terminal | The actual game on a real pty: the intro waits for a key, start and quit exit 0 with the cheat sheet, shrinking and re-growing the window, resizing during the intro, Ctrl+C, a held key, idle output volume |
+| Game clock | The fixed-step clock: no ticks before a step, one per step, capped catch-up after a stall, and — through the real loop — a held key adding no ticks |
 
 Navigation in the tests uses `terminalquest.walk_to`, a small BFS
 pathfinder, instead of hardcoded step counts — so if you rearrange a room or
@@ -372,15 +407,28 @@ Every push and pull request runs the whole suite on **macOS and Linux** across
 
 ### Real-terminal QA
 
-Beyond the unit tests, the release was played in an actual pseudo-terminal
-with a terminal emulator reading the screen: a complete run through all 8
-stations with real arrow-key escape sequences and typed commands, all three
-quiz flows, the coin rule, the win screen and `:wq`, quitting, Ctrl+C,
-resizing the window, the safety guards (with a throwaway `HOME`), and the
-command-line flags. That pass found and fixed: an intro screen that vanished
-after a tenth of a second, `rm -rf ~` slipping past the guard, Python
-tracebacks on Ctrl+C or with no terminal, and Esc taking a full second to
-register.
+Beyond the unit tests, the game was played in an actual pseudo-terminal with a
+terminal emulator reading the screen: a complete run through all 8 stations
+with real arrow-key escape sequences and typed commands (87 checks), random
+keys and random window sizes from 3x20 up to 200x60, a 700-game offline fuzz
+campaign (280,000 random keystrokes), the safety guards with a throwaway
+`HOME`, and the command-line flags. Across the two passes this found and fixed:
+
+- an intro screen that vanished after a tenth of a second;
+- `rm -rf ~` slipping past the guard;
+- Python tracebacks on Ctrl+C or with no terminal, and Esc taking a full
+  second to register;
+- a wrong `:wq` being silently ignored on the win screen;
+- **non-UTF-8 command output crashing the whole game** with a traceback;
+- **a bare `cat` freezing the game for 10 seconds** and eating the player's
+  keystrokes (commands inherited the game's own keyboard);
+- background jobs and runaway output (`yes`) holding the game up or growing
+  without limit;
+- **holding an arrow key running the world 2.7x too fast** (game time was
+  tied to keypresses);
+- **a window resize counting as a keypress**, restarting the game from the
+  game-over screen and dismissing signs;
+- a negative-width crash in the popup renderer on a tiny window.
 
 ### Quality approach
 
@@ -398,14 +446,15 @@ How the suite is designed, and what was run before this release:
   previous session can't solve a station.
 - **Resilient to change.** Tests navigate with a BFS pathfinder (`walk_to`)
   rather than hardcoded step counts, so moving a door doesn't break them.
-- **Deterministic and fast.** No real terminal, network, or timing
-  dependence; the full suite runs in about a second.
-- **Release check.** Before the latest release: `pytest` → 407 passed,
+- **Fast and stable.** No network, and the few timing-sensitive checks use
+  generous timeouts; the full suite runs in well under a minute, including the
+  fuzz and real-terminal tests.
+- **Release check.** Before the latest release: `pytest` → 502 passed,
   `python3 terminalquest.py --reset --selftest` → `SELFTEST PASSED`, run from a
   clean checkout with no stale `__pycache__`.
 
 - **Measured coverage.** `pytest --cov=terminalquest --cov-branch` reports
-  **98%** (1373 statements, 534 branches, 407 tests). The live curses `main()`
+  **98%** (1399 statements, 546 branches, 502 tests). The live curses `main()`
   loop is exercised by a scripted fake screen that feeds it real keypresses, so
   input handling is covered too. What's left is small: a few defensive
   branches, the subprocess-timeout path and the `__main__` entry point. Note

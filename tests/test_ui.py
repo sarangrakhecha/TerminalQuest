@@ -8,7 +8,7 @@ import pytest
 import terminalquest as tq
 from test_game import FakeScreen, enter, solve
 
-CP_NAMES = ("CP_PLAYER", "CP_ENEMY", "CP_DOOR", "CP_COMP", "CP_COIN", "CP_OK", "CP_ERR")
+CP_NAMES = ("CP_PLAYER", "CP_ENEMY", "CP_DOOR", "CP_COMP", "CP_COIN", "CP_OK", "CP_ERR", "CP_GOOD", "CP_WALL")
 
 
 @pytest.fixture(autouse=True)
@@ -42,8 +42,8 @@ def qgame(tmp_path):
 class TestSetupColors:
     def test_color_mode_assigns_color_pairs(self, fake_curses):
         tq.setup_colors()
-        assert len(fake_curses["pairs"]) == 4
-        assert tq.CP_PLAYER and tq.CP_ENEMY and tq.CP_DOOR and tq.CP_COMP
+        assert len(fake_curses["pairs"]) == 6
+        assert tq.CP_PLAYER and tq.CP_ENEMY and tq.CP_DOOR and tq.CP_COMP and tq.CP_GOOD and tq.CP_WALL
         assert tq.CP_COIN == 0  # deliberately uncolored
 
     def test_high_contrast_uses_attributes_not_colors(self, fake_curses):
@@ -144,9 +144,10 @@ class ScriptedScreen(FakeScreen):
     def __init__(self, keys, h=40, w=160):
         super().__init__(h, w)
         self.keys = list(keys)
+        self.timeouts = []   # every stdscr.timeout() main() asked for, in order
 
     def timeout(self, ms):
-        pass
+        self.timeouts.append(ms)
 
     def getch(self):
         if not self.keys:
@@ -162,7 +163,74 @@ def run_main(monkeypatch, game, keys, size=(40, 160)):
     return screen
 
 
+class TestFixedStep:
+    """Game time follows the wall clock, not the number of loop passes."""
+
+    def test_nothing_is_due_before_a_full_step_has_passed(self):
+        c = tq.FixedStep(0.1, now=100.0)
+        assert c.due(100.0) == 0
+        assert c.due(100.09) == 0
+
+    def test_one_tick_per_step(self):
+        c = tq.FixedStep(0.1, now=100.0)
+        assert c.due(100.1) == 1
+        assert c.due(100.1) == 0       # already paid
+        assert c.due(100.2) == 1
+
+    def test_many_calls_in_the_same_instant_never_add_ticks(self):
+        # the held-arrow-key case: dozens of loop passes inside one step
+        c = tq.FixedStep(0.1, now=0.0)
+        assert sum(c.due(0.05) for _ in range(50)) == 0
+
+    def test_a_short_stall_catches_up_a_little(self):
+        c = tq.FixedStep(0.1, now=0.0)
+        assert c.due(0.25) == 2
+
+    def test_a_long_stall_is_capped_and_the_backlog_dropped(self):
+        # a command that blocked for 10s must not fast-forward the world
+        c = tq.FixedStep(0.1, now=0.0)
+        assert c.due(10.0) == tq.MAX_CATCHUP
+        assert c.due(10.0) == 0
+        assert c.due(10.1) == 1
+
+    def test_wait_ms_is_the_time_left_and_never_zero(self):
+        c = tq.FixedStep(0.1, now=0.0)
+        assert c.wait_ms(0.0) == 100
+        assert c.wait_ms(0.04) == 60
+        assert c.wait_ms(5.0) == 1     # overdue: poll, don't block, don't pass 0 (= non-blocking)
+
+
 class TestMainLoop:
+    def test_holding_a_key_does_not_speed_up_the_world(self, fake_curses, monkeypatch, qgame):
+        # Real bug: the loop ticked once per getch() return, and getch()
+        # returns instantly on every keypress — so a held arrow key ran
+        # enemies and timers ~3x too fast. Frozen clock => zero ticks.
+        import types
+        monkeypatch.setattr(tq, "time", types.SimpleNamespace(monotonic=lambda: 1000.0))
+        keys = [" "] + [curses.KEY_RIGHT, curses.KEY_LEFT] * 20 + ["q", "y"]
+        run_main(monkeypatch, qgame, keys)
+        assert qgame.tick_count == 0
+
+    def test_a_long_stall_does_not_fast_forward_the_world(self, fake_curses, monkeypatch, qgame):
+        import types
+        now = [1000.0]
+        monkeypatch.setattr(tq, "time", types.SimpleNamespace(monotonic=lambda: now[0]))
+        screen = ScriptedScreen([" ", "q", "y"], 40, 160)
+        real_getch = screen.getch
+        def getch_after_a_stall():
+            now[0] += 60.0            # e.g. a command that ran for a minute
+            return real_getch()
+        screen.getch = getch_after_a_stall
+        monkeypatch.setattr(tq, "Game", lambda *a, **k: qgame)
+        tq.main(screen)
+        assert qgame.tick_count <= tq.MAX_CATCHUP * 3
+
+    def test_the_game_blocks_only_until_the_next_tick(self, fake_curses, monkeypatch, qgame):
+        screen = run_main(monkeypatch, qgame, [" ", "q", "y"])
+        assert screen.timeouts[0] == -1                    # the intro: wait for a real key
+        loop_waits = screen.timeouts[1:]
+        assert loop_waits and all(1 <= ms <= 100 for ms in loop_waits)
+
     def test_any_key_starts_then_q_quits(self, fake_curses, monkeypatch, qgame):
         run_main(monkeypatch, qgame, ["x", "q", "y"])
 
